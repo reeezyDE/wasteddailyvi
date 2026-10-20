@@ -141,9 +141,15 @@ def emoji_png(emoji: str, size: int, cache_dir: Path) -> Path | None:
             if svg is None:
                 continue
             png = edir / f"{name}_{int(size)}.png"
-            import cairosvg  # erst hier: braucht libcairo
+            try:
+                import cairosvg  # erst hier: braucht libcairo (unter Windows oft nicht vorhanden)
 
-            data = cairosvg.svg2png(bytestring=svg, output_width=int(size), output_height=int(size))
+                data = cairosvg.svg2png(bytestring=svg, output_width=int(size), output_height=int(size))
+            except (ImportError, OSError) as e:
+                data = _png_fallback(name, int(size))  # fertiges 72-px-PNG hochskalieren
+                if data is None:
+                    raise
+                log.info("cairosvg unavailable (%s) - using Twemoji PNG for %s", e, name)
             tmp = png.with_name(png.name + ".tmp")
             tmp.write_bytes(data)
             os.replace(tmp, png)
@@ -159,6 +165,21 @@ def emoji_png(emoji: str, size: int, cache_dir: Path) -> Path | None:
         except Exception:
             pass
     return None
+
+
+def _png_fallback(name: str, size: int) -> bytes | None:
+    """Twemoji-72x72-PNG laden und auf size px skalieren (ohne libcairo). None, wenn nicht vorhanden."""
+    import io
+
+    url = TWEMOJI_URL.format(name=name).replace("/svg/", "/72x72/").replace(".svg", ".png")
+    with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=True) as client:
+        r = client.get(url)
+    if r.status_code != 200 or not r.content.startswith(b"\x89PNG"):
+        return None
+    with Image.open(io.BytesIO(r.content)) as im:
+        out = io.BytesIO()
+        im.convert("RGBA").resize((size, size), Image.LANCZOS).save(out, "PNG")
+    return out.getvalue()
 
 
 def _fetch_svg(name: str, edir: Path) -> bytes | None:

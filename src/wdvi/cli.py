@@ -851,5 +851,78 @@ def auth(
         typer.echo(f"Redirect-URL in der Google Cloud Console: {base}/oauth/youtube/callback")
 
 
+# --------------------------------------------------------------------------- studio (Claude Code als Editor)
+
+studio_app = typer.Typer(
+    help="Studio: Claude Code schneidet selbst (ohne API-Kosten). Ablauf: prepare -> plan.json schreiben -> render.",
+    no_args_is_help=True,
+)
+app.add_typer(studio_app, name="studio")
+
+
+@studio_app.command("prepare")
+def studio_prepare(
+    ctx: typer.Context,
+    source: Annotated[Path, typer.Argument(help="Video-Datei (MP4, beliebiger Codec).")],
+    out: Annotated[Path, typer.Option("--out", "-o", help="Arbeitsordner für diesen Clip.")],
+    start: Annotated[float | None, typer.Option("--start", help="Start des Ausschnitts (s).")] = None,
+    end: Annotated[float | None, typer.Option("--end", help="Ende des Ausschnitts (s).")] = None,
+) -> None:
+    """Ausschnitt -> source.mp4, Transkript (transcript.txt), Analyse (analysis.json), Übersicht (sheet.jpg)."""
+    from wdvi import studio
+
+    if not source.is_file():
+        raise _fail(f"Datei nicht gefunden: {source}", 2)
+    settings = _settings(ctx)
+    settings.config.paths.ensure()
+    typer.echo("⚙️  Schneiden, Whisper, Analyse …")
+    p = studio.prepare(source, out, settings, start=start, end=end)
+    typer.echo(studio.summary(p))
+
+
+@studio_app.command("frame")
+def studio_frame(
+    ctx: typer.Context,
+    workdir: Annotated[Path, typer.Argument(help="Arbeitsordner aus 'studio prepare'.")],
+    t: Annotated[float, typer.Argument(help="Zeitpunkt in source.mp4 (s).")],
+) -> None:
+    """Einzelbild mit Koordinatengitter – um Boxen für focus/annotations abzulesen."""
+    from wdvi import studio
+
+    _settings(ctx)
+    out = studio.grid_still(workdir / "source.mp4", t, workdir / f"frame_{t:.2f}.jpg")
+    typer.echo(str(out))
+
+
+@studio_app.command("render")
+def studio_render(
+    ctx: typer.Context,
+    workdir: Annotated[Path, typer.Argument(help="Arbeitsordner aus 'studio prepare'.")],
+    creator: Annotated[str, typer.Option("--creator", help="Name des Creators für das Credit-Label.")],
+    platform: Annotated[str, typer.Option("--platform", help="Twitch, YouTube, Kick, …")] = "Twitch",
+    plan: Annotated[Path | None, typer.Option("--plan", help="Plan-Datei (Standard: <workdir>/plan.json).")] = None,
+    creator_url: Annotated[str | None, typer.Option("--creator-url")] = None,
+    facecam: Annotated[str | None, typer.Option("--facecam", help="Facecam-Box überschreiben: x,y,w,h")] = None,
+    gameplay: Annotated[str | None, typer.Option("--gameplay", help="Gameplay-Box überschreiben: x,y,w,h")] = None,
+    no_watermark: Annotated[bool, typer.Option("--no-watermark", help="Ohne Wasted-Daily-Logo.")] = False,
+) -> None:
+    """plan.json prüfen und rendern -> out/*.mp4 + preview.jpg (Frames an jedem Shot-Wechsel)."""
+    from wdvi import studio
+
+    settings = _settings(ctx)
+    settings.config.paths.ensure()
+    if no_watermark:
+        settings.config.brand.show_watermark = False
+    try:
+        video, preview, clean = studio.render(workdir, plan or workdir / "plan.json", settings, creator, platform,
+                                              creator_url, facecam, gameplay)
+    except ValueError as e:
+        raise _fail(str(e)) from e
+    typer.echo(f"✅ {video}")
+    typer.echo(f"   Vorschau: {preview}")
+    typer.echo(f"   Lautheit: {studio.loudness(video)} | Shots: {len(clean.shots)} | "
+               f"Markierungen: {len(clean.annotations)} | bereinigter Plan: {workdir / 'plan.sanitized.json'}")
+
+
 if __name__ == "__main__":  # python -m wdvi.cli
     app()

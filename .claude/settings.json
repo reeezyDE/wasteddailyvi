@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(.venv/bin/ruff check:*)",
+      "Bash(.venv/bin/wdvi:*)",
+      "Bash(.venv/bin/python -c:*)",
+      "Bash(.venv/Scripts/pytest:*)",
+      "Bash(.venv/Scripts/ruff check:*)",
+      "Bash(.venv/Scripts/wdvi:*)",
+      "Bash(.venv/Scripts/python -c:*)",
+      "Bash(wdvi studio:*)",
+      "Bash(wdvi doctor:*)",
+      "Bash(wdvi render-demo:*)",
+      "Bash(ffprobe:*)",
+      "Bash(ffmpeg -hide_banner:*)",
+      "Bash(yt-dlp --skip-download:*)",
+      "Bash(yt-dlp -F:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)"
+    ]
+  }
+}

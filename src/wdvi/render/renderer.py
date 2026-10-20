@@ -351,8 +351,16 @@ def _face_box(analysis: MediaAnalysis, plan: EditPlan) -> Box | None:
         n = len(v)
         return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
 
-    return Box(x=med([b.x for b in boxes]), y=med([b.y for b in boxes]), w=med([b.w for b in boxes]),
-               h=med([b.h for b in boxes]))
+    w, h = med([b.w for b in boxes]), med([b.h for b in boxes])
+    # Mitte bevorzugt aus der Gesichtsspur: gleichmäßig über den Clip verteilt, während die Standbilder sich
+    # an lauten Momenten häufen (dort lehnt der Streamer oft zur Seite -> Ausschnitt säße schief)
+    track = [p for p in analysis.layout.track
+             if fc is None or (fc.x <= p.cx <= fc.x + fc.w and fc.y <= p.cy <= fc.y + fc.h)]
+    if len(track) >= 3:
+        cx, cy = med([p.cx for p in track]), med([p.cy for p in track])
+    else:
+        cx, cy = med([b.cx for b in boxes]), med([b.cy for b in boxes])
+    return Box(x=cx - w / 2, y=cy - h / 2, w=w, h=h)
 
 
 def _sfx_events(plan: EditPlan, tm: TimeMap, zooms: list[compositor.ZoomOut],

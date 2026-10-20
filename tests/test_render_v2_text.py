@@ -366,3 +366,24 @@ def test_censor_word_masks_common_profanity_only():
     assert censor_word("fun") == "fun"
     assert display_text("fucking", True, True) == "F*CKING"
     assert display_text("fucking", True, False) == "FUCKING"
+
+
+def test_emoji_png_falls_back_without_cairo(tmp_path, monkeypatch):
+    """Windows ohne libcairo: emoji_png nutzt das Twemoji-PNG statt des SVG-Renderers."""
+    import io
+    import sys
+
+    from PIL import Image
+
+    from wdvi.render import overlays
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(buf, "PNG")
+    edir = tmp_path / "emoji"
+    edir.mkdir()
+    (edir / "1f480.svg").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    monkeypatch.setitem(sys.modules, "cairosvg", None)  # import cairosvg -> ImportError
+    monkeypatch.setattr(overlays, "_png_fallback", lambda name, size: buf.getvalue())
+    monkeypatch.setattr(overlays, "_failed", {})
+    out = overlays.emoji_png("💀", 120, tmp_path)
+    assert out is not None and out.is_file()

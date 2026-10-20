@@ -24,7 +24,8 @@ Läuft 24/7 in Docker auf deinem Windows- oder Linux-PC mit NVIDIA-Grafikkarte.
 9. [Kosten](#kosten)
 10. [Spielregeln – bitte lesen!](#spielregeln--bitte-lesen)
 11. [Fehlerbehebung](#fehlerbehebung)
-12. [Für Entwickler](#für-entwickler)
+12. [Mit Claude Code weiterarbeiten](#mit-claude-code-weiterarbeiten)
+13. [Für Entwickler](#für-entwickler)
 
 Ausführliche Anleitungen:
 
@@ -358,6 +359,37 @@ Erster Schritt immer: `docker compose run --rm wdvi wdvi doctor` – das zeigt f
 | Festplatte voll | Läuft normalerweise nicht voll: gepostete Videos werden nach 14 Tagen gelöscht, unter 5 GB frei pausiert die Verarbeitung (`cleanup` in config.yaml, siehe [docs/BETRIEB.md](docs/BETRIEB.md#speicherplatz)). |
 | `permission denied` in `data/` | Linux/WSL: `APP_UID=$(id -u)` in `.env` eintragen (deine Benutzer-ID), `sudo chown -R $(id -u):$(id -g) data claude-home`, dann `docker compose build && docker compose up -d`. |
 | „Unbekannte Einträge in config.yaml“ | Tippfehler oder falsch eingerückt – die Einstellung wirkt sonst nicht. Schreibweise mit `config.example.yaml` vergleichen. |
+
+## Mit Claude Code weiterarbeiten
+
+Das Projekt ist so aufgebaut, dass Claude Code (lokal auf deinem PC oder in der Cloud) direkt weitermachen kann –
+du schickst Claude einfach den Repo-Link.
+
+**Einmalig auf dem PC (PowerShell):**
+```powershell
+irm https://claude.ai/install.ps1 | iex        # Claude Code (alternativ: winget install Anthropic.ClaudeCode)
+git clone https://github.com/reeezyDE/wasteddailyvi
+cd wasteddailyvi
+powershell -ExecutionPolicy Bypass -File scripts\dev-setup.ps1   # Python-Umgebung, ffmpeg, Deno, Tests-Check
+claude                                         # Claude Code im Projektordner starten
+```
+Claude liest automatisch `CLAUDE.md` (Projektkarte, Regeln, Befehle) – das spart Tokens, weil Claude nicht erst
+den ganzen Code durchsuchen muss.
+
+**Clip schneiden lassen:** in Claude Code einfach schreiben, z. B. *„/clip schneide aus quelle.mp4 den Moment bei
+40:30“* oder einen YouTube-Link schicken. Claude nutzt dann den **Studio-Modus** und ist selbst der Editor
+(läuft über dein Claude-Abo, **keine API-Kosten**):
+
+```powershell
+wdvi studio prepare quelle.mp4 -o clips\mein_clip --start 2420 --end 2520   # Transkript, Analyse, Übersicht
+wdvi studio frame clips\mein_clip 13.0                                    # Einzelbild mit Koordinatengitter
+wdvi studio render clips\mein_clip --creator "Pikaboo" --platform YouTube  # plan.json -> fertiges MP4
+```
+
+**Dauerbetrieb ohne API-Key:** in `config.yaml` `llm.backend: cli` setzen – dann bewertet die Pipeline Clips
+über `claude -p` mit deinem Abo (Nutzungslimits beachten).
+
+Videos gehören nicht ins Repo (`rohclips/` und `*.mp4` sind ignoriert) – lokal liegen sie einfach im Ordner.
 
 ## Für Entwickler
 
