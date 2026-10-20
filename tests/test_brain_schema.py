@@ -73,7 +73,7 @@ def test_edit_plan_details():
     assert zoom["type"] == "object" and zoom["additionalProperties"] is False
     assert zoom["properties"]["focus"]["enum"] == ["face", "gameplay", "center"]
     emph = props["emphasis"]["items"]
-    assert emph["required"] == ["t", "emoji", "sfx"]
+    assert emph["required"] == ["t", "emoji", "sfx", "shake", "flash"]  # v2: shake/flash
     sfx = emph["properties"]["sfx"]["anyOf"]
     assert any("record_scratch" in (t.get("enum") or []) for t in sfx)
     assert props["titles"]["required"] == ["youtube", "tiktok", "instagram"]

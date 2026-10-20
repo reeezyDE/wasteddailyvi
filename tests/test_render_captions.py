@@ -104,7 +104,7 @@ def test_ass_events_content_and_order(settings, sample_transcript, tmp_path):
         assert e1 <= s2 + 1e-9  # keine Überlappung
         assert s1 < e1
     first = evs[0][2]
-    assert "\\pos(540,1267)" in first  # y_ratio 0.66 * 1920
+    assert "\\pos(540,1440)" in first  # gameplay_fit: y_ratio_fit 0.75 * 1920
     assert _plain(first) == "NO WAY HE"  # Großbuchstaben, ganze Zeile
     assert "\\c&H872DFF&" in first  # aktives Wort in color_primary (#FF2D87 -> BGR)
     assert "\\t(" in first and "\\fscx" in first  # Pop-Animation
@@ -189,7 +189,7 @@ def test_severe_slurs_are_masked_in_burned_in_captions(settings, tmp_path):
     evs = _events(captions.build_ass(words, TimeMap(segments=[(0.0, 10.0)]), [], "gameplay_fit", settings,
                                      tmp_path / "c.ass"))
     shown = [_plain(t) for _, _, t in evs]
-    assert shown == ["BRO", "N****", "NO", "WAY", "F******", "FUCKING", "SHIT"]  # normale Flüche bleiben
+    assert shown == ["BRO", "N****", "NO", "WAY", "F******", "F*CKING", "SH*T"]  # Flüche entschärft (caption_censor)
     raw = (tmp_path / "c.ass").read_text(encoding="utf-8").lower()
     assert _slur("avttn") not in raw and _slur("snttbg") not in raw
 
@@ -227,3 +227,11 @@ def test_ass_renders_with_libass(settings, sample_transcript, tmp_path):
                            "color=c=gray:s=1080x1920:d=1.5:r=10", "-vf", f"ass={ass.name}:fontsdir=fonts",
                            "-f", "null", "-"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_caption_y_ratio_per_layout(settings):
+    cfg = settings.config
+    assert captions.caption_y_ratio(cfg, "facecam_split") == cfg.render.split_facecam_ratio
+    assert captions.caption_y_ratio(cfg, "gameplay_fit") == cfg.render.captions.y_ratio_fit
+    assert captions.caption_y_ratio(cfg, "face_track") == cfg.render.captions.y_ratio
+    assert captions.caption_y_ratio(cfg, "vertical_native") == cfg.render.captions.y_ratio

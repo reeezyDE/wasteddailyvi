@@ -209,12 +209,23 @@ def _candidate_in(cand: Candidate | None) -> Any:
 
 
 def compose_edited_description(
-    platform: str, edited: str, current: str | None, hashtags: list[str], cin: Any, settings: Any
+    platform: str,
+    edited: str,
+    current: str | None,
+    hashtags: list[str],
+    cin: Any,
+    settings: Any,
+    *,
+    plan: dict | None = None,
+    transcript: str | None = None,
 ) -> str:
     """Bearbeitete Beschreibung wie bei der Freigabe (Pipeline._edited_description) aufbereiten:
-    Unveränderter Text bleibt exakt; sonst wird der alte Anhang (Credit, Fan-Hinweis, Hashtag-Zeile)
-    abgetrennt und neu angehängt. So gehen Credit und Fan-Hinweis auch über „Nur Texte speichern“ nicht
-    verloren (die Freigabe übernimmt gespeicherte Texte unverändert)."""
+    Unveränderter Text bleibt exakt; sonst wird der alte Anhang (Credit, Fan-Hinweis, Transkript, Hashtag-Zeile)
+    abgetrennt und neu angehängt. So gehen Credit, Fan-Hinweis und Transkript (YouTube) auch über
+    „Nur Texte speichern“ nicht verloren (die Freigabe übernimmt gespeicherte Texte unverändert).
+    Steht im Anhang noch ein "Transcript:"-Block, gilt dessen (evtl. korrigierter) Text; wurde nur der
+    Transkript-Block gelöscht, bleibt er weg; fehlt der ganze Anhang, kommt transcript (gespeichert) zurück.
+    plan (Clip.plan) liefert Titel und Tags für die GTA-Erkennung (#GTA6 nur bei GTA-Inhalten)."""
     d = (edited or "").replace("\r\n", "\n").strip()
     if current is not None and d == current.strip():
         return current
@@ -223,11 +234,23 @@ def compose_edited_description(
     try:
         markers = [m for m in (text.credit_line(cin), text.FAN_DISCLAIMER, CREDIT_PREFIX) if m]
         cuts = [d.find(m) for m in markers if m in d]
-        body, tail_tags = d, None
+        body, tail_tags, spoken = d, None, transcript
         if cuts:
             cut = min(cuts)
-            body, tail_tags = d[:cut].rstrip(), text.hashtags_in(d[cut:])
-        return text.compose_description(platform, body, tail_tags or hashtags, cin, settings)
+            body, tail = d[:cut].rstrip(), d[cut:]
+            tail_tags, spoken = text.hashtags_in(tail), text.transcript_in(tail)
+        pl = plan if isinstance(plan, dict) else {}
+        titles = pl.get("titles") if isinstance(pl.get("titles"), dict) else {}
+        return text.compose_description(
+            platform,
+            body,
+            tail_tags or hashtags,
+            cin,
+            settings,
+            transcript=spoken,
+            title=" ".join(str(t) for t in titles.values() if t),
+            tags=[str(t) for t in (pl.get("tags") or [])],
+        )
     except Exception as e:  # noqa: BLE001 - lieber Text behalten als Speichern scheitern lassen
         log.warning("compose_description failed for %s: %s", platform, e)
         return d
@@ -249,9 +272,12 @@ def save_clip_texts(
             cin = _candidate_in(s.get(Candidate, clip.candidate_id))
             plan = clip.plan if isinstance(clip.plan, dict) else {}
             hashtags = [str(h) for h in (plan.get("hashtags") or [])]
+            spoken = str((clip.analysis or {}).get("transcript_kept") or "") or None
             for p, d in descriptions.items():
                 # ohne gespeicherten Text (nur Plan-Rohtext ohne Credit) immer neu zusammensetzen
-                new_desc[p] = compose_edited_description(p, d, old.get(p) or None, hashtags, cin, settings)
+                new_desc[p] = compose_edited_description(
+                    p, d, old.get(p) or None, hashtags, cin, settings, plan=plan, transcript=spoken
+                )
         # JSON-Spalten erkennen keine In-place-Änderungen -> neue Dicts zuweisen
         clip.titles = {**(clip.titles or {}), **titles}
         clip.descriptions = new_desc

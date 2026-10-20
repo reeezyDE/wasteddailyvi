@@ -194,7 +194,11 @@ def test_reject_redirects_back_to_page_but_not_offsite(dash):
 
 
 def test_save_texts_updates_pending_clip_only(dash):
-    clip_id = add_clip(dash.clips_dir, titles={"youtube": "alt", "tiktok": "bleibt"})
+    # realistischer GTA-Plan (v1-Pläne hatten immer gta6 + "GTA 6" im Titel); #GTA6 nur bei GTA-Inhalten
+    plan = {"hook_text": "HE ACTUALLY DID IT", "reasoning": "r", "hashtags": ["gta6", "gaming"],
+            "titles": {"youtube": "He did it | GTA 6", "tiktok": "Plan TT", "instagram": "Plan IG"},
+            "descriptions": {"youtube": "Plan YT desc", "tiktok": "Plan TT desc", "instagram": "Plan IG desc"}}
+    clip_id = add_clip(dash.clips_dir, titles={"youtube": "alt", "tiktok": "bleibt"}, plan=plan)
     r = dash.client.post(f"/clips/{clip_id}/texts",
                          data={"title_youtube": "Neu\nTitel", "desc_youtube": "Neue Beschreibung",
                                "platforms": "youtube"},
@@ -206,7 +210,7 @@ def test_save_texts_updates_pending_clip_only(dash):
     assert list(clip.descriptions) == ["youtube"]
     assert clip.descriptions["youtube"].startswith("Neue Beschreibung\n\n🎥 Clip: xQc on Twitch")
     assert "Fan channel – not affiliated" in clip.descriptions["youtube"]
-    assert clip.descriptions["youtube"].endswith("#GTA6")
+    assert clip.descriptions["youtube"].endswith("#GTA6 #gaming")
     assert clip.status == "pending_review"
     assert dash.pipeline.approved == []
 

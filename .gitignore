@@ -9,3 +9,8 @@ config.yaml
 client_secret*.json
 claude-home/
 backups/
+# Videos gehören nicht ins Repo (lokaler Clone bleibt klein)
+/*.mp4
+rohclips/*
+!rohclips/README.md
+clips/

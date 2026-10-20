@@ -37,7 +37,7 @@ def test_normalize_hashtags_dedupe_and_gta6_first():
     assert tags[0] == "GTA6"
     assert [t.lower() for t in tags] == ["gta6", "gtavi", "funnymoments", "fyp"]
     many = normalize_hashtags([f"tag{i}" for i in range(20)])
-    assert len(many) == 8 and many[0] == "GTA6"
+    assert len(many) == text.MAX_HASHTAGS == 5 and many[0] == "GTA6"
 
 
 def test_compose_description_structure(candidate, settings):
@@ -63,8 +63,9 @@ def test_compose_description_skips_tags_already_in_body(candidate, settings):
 
 
 def test_compose_description_always_has_gta6_even_with_many_body_tags(candidate, settings):
+    # GTA-Inhalt (Hashtag erwähnt GTA): #GTA6 kommt trotz voller Hashtag-Liste im Text dazu
     body = " ".join(f"#t{i}" for i in range(12))
-    d = compose_description("instagram", body, ["x"], candidate, settings)
+    d = compose_description("instagram", body, ["x", "gtavi"], candidate, settings)
     assert "#GTA6" in d
     assert "#x" not in d.split()
 

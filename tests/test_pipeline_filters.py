@@ -315,9 +315,12 @@ def test_stale_processing_is_recovered(settings, db, monkeypatch):
 
 def test_fresh_processing_is_not_touched(settings, db, monkeypatch):
     p, fakes = _setup(settings, monkeypatch, [make_cand("Busy")])
+    from wdvi.pipeline import utcnow
+
     with dbmod.session_scope() as s:
         row = s.exec(select(Candidate)).one()
         row.status = "processing"
+        row.updated_at = utcnow()  # "frisch" nach Wanduhr (Stale-Erkennung nutzt die echte Zeit, nicht NOW)
     assert p.process_cycle(now=NOW) == 0  # könnte gerade in einem anderen Prozess laufen
     assert _cand("twitch_clip:Busy").status == "processing"
 

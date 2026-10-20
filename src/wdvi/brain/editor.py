@@ -14,6 +14,8 @@ from wdvi.brain import prompts
 from wdvi.brain.claude import LLMClient
 from wdvi.config import Settings
 from wdvi.schemas import (
+    Annotation,
+    Box,
     CandidateIn,
     EditPlan,
     Emphasis,
@@ -24,9 +26,11 @@ from wdvi.schemas import (
     PerformanceExample,
     PlatformText,
     Segment,
+    Shot,
     SourceKind,
     Transcript,
     Word,
+    WordColor,
     Zoom,
 )
 from wdvi.sources.youtube import HeatPoint, VideoContext
@@ -53,7 +57,8 @@ ZOOM_WHOOSH_MERGE_S = 0.3  # so nah am Zoom-Start legt der Renderer zwei whooshs
 ZOOM_WHOOSH_GAP_S = 0.6  # darüber hinaus bis hierhin: eigener whoosh klänge doppelt -> weg
 SLUR_PAD_S = 0.05  # Slur-Schnitt: etwas Rand um das Wort
 SLUR_MIN_CUT_S = 0.32
-MAX_HASHTAGS = 8
+MAX_HASHTAGS = 8  # Plan darf bis zu 8 haben (Rest geht in die YouTube-Tags) ...
+PROMPT_HASHTAGS = 5  # ... die Beschreibung zeigt aber nur 3–5 (publish.text.MAX_HASHTAGS)
 HOOK_MAX_WORDS = 6
 HOOK_MAX_CHARS = 32
 MAX_HIGHLIGHT_WORDS = 6
@@ -63,6 +68,31 @@ DESCRIPTION_MAX = {"youtube": 3000, "tiktok": 1200, "instagram": 1200}  # Platz 
 MOMENT_MIN_S = 15.0
 MOMENT_MAX_S = 55.0
 SNAP_TOLERANCE_S = 2.0
+
+# Edit-Engine v2 (sanitize_plan)
+MIN_SHOT_S = 0.6  # kürzere Shots (behaltene Zeit) werden mit dem Nachbarn verschmolzen (Punch-ins ab 0.6 s)
+MAX_SHOTS = 48
+SHOT_ZOOM_MIN, SHOT_ZOOM_MAX = 1.0, 1.6
+MAX_GLITCH = 2  # glitch nur sparsam, Rest wird zu cut
+MIN_ANNOTATION_S = 0.4
+MAX_ANNOTATIONS = 3
+MIN_BOX = 0.03  # Mindestbreite/-höhe normalisierter Boxen
+LABEL_MAX_WORDS = 3
+LABEL_MAX_CHARS = 24
+MAX_WORD_COLORS = 12
+WORD_COLOR_MAX_CHARS = 32
+OUTRO_MAX_WORDS = 8
+OUTRO_MAX_CHARS = 48
+MAX_TAGS = 15
+TAG_MAX_CHARS = 30
+TAGS_TOTAL_MAX = 450  # YouTube erlaubt 500 Zeichen für alle Tags zusammen
+MAX_SHAKES = 3
+MAX_FLASHES = 2
+HOOK_SPOKEN_WINDOW_S = 2.0  # hook_style "none" braucht gesprochene Worte so kurz nach trim_start
+
+# Koordinatengitter auf Kopien der Frames (Claude liest normalisierte Boxen ab)
+GRID_DIR = "_grid"
+GRID_STEPS = 10
 
 _UPPER_KEEP = {"GTA", "GTA6", "GTAVI", "VI", "NPC", "NPCS", "RP", "LSPD", "FIB", "IRL", "OMG", "WTF", "LOL",
                "LMAO", "POV", "FPS", "PC", "PS5", "XBOX", "AI", "USA", "US", "UK", "TV"}
@@ -74,6 +104,7 @@ _SLUR_RE = re.compile(
     re.IGNORECASE)
 _MENTION_RE = re.compile(r"(?<![\w@.])@(?=\w)")  # @handle (keine E-Mail-Adressen)
 _GTA6_VARIANT_RE = re.compile(r"(?<![#\w])gta[\s-]*(?:6|vi)(?!\w)", re.IGNORECASE)
+_GTA_ANY_RE = re.compile(r"gta|grand\s*theft\s*auto|vice\s*city|leonida", re.IGNORECASE)  # wie publish/text
 _GTA6_PRESENT_RE = re.compile(r"\bGTA 6\b|\bgrand theft auto (?:vi|6)\b", re.IGNORECASE)
 _URL_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
 # Zusatzinfos, die nicht unbeschriftet im Prompt landen dürfen (Verwechslung mit dem Creator) oder eine
@@ -100,10 +131,12 @@ def plan_clip(llm: LLMClient, c: CandidateIn, analysis: MediaAnalysis, examples:
 
     frames = [f for f in _select_frames(analysis.frames, settings.config.llm.max_frames) if _frame_ok(f)]
     if frames:
-        blocks.append({"type": "text", "text": f"STILL FRAMES ({len(frames)}, labeled with source time):"})
+        blocks.append({"type": "text", "text": f"STILL FRAMES ({len(frames)}, labeled with source time; the "
+                                               "10x10 grid with 0.0-1.0 labels is drawn on top for reading "
+                                               "normalized coordinates and is not part of the video):"})
     for f in frames:
         blocks.append({"type": "text", "text": f"Frame t={f.t:.2f}s (faces: {len(f.faces)})"})
-        blocks.append({"type": "image", "path": str(Path(f.path).resolve()), "t": f.t})
+        blocks.append({"type": "image", "path": str(grid_frame(Path(f.path)).resolve()), "t": f.t})
     blocks.append({"type": "text", "text": prompts.EDITOR_TASK})
 
     result = llm.complete_json(prompts.SYSTEM_EDITOR, blocks, EditPlan, max_tokens=MAX_OUTPUT_TOKENS)
@@ -144,6 +177,69 @@ def _frame_ok(f: FrameSample) -> bool:
         return True
     log.warning("editor: frame %s missing – not sent to Claude", f.path)
     return False
+
+
+def grid_frame(path: Path) -> Path:
+    """Kopie des Frames mit dezentem 10x10-Koordinatengitter (Beschriftung 0.0–1.0 an den Rändern), damit
+    Claude normalisierte Boxen (focus/annotations) genau ablesen kann. Das Original bleibt unverändert;
+    die Kopie liegt in <frame-ordner>/_grid/. Bei Fehlern wird das Original zurückgegeben."""
+    out = path.parent / GRID_DIR / (path.stem + ".jpg")
+    try:
+        if out.is_file() and out.stat().st_mtime >= path.stat().st_mtime:
+            return out
+        from PIL import Image, ImageDraw, ImageFont
+
+        with Image.open(path) as im:
+            base = im.convert("RGB")
+        w, h = base.size
+        if w < 32 or h < 32:
+            return path
+        layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        line_w = max(1, round(min(w, h) / 400))
+        for i in range(1, GRID_STEPS):
+            x = round(w * i / GRID_STEPS)
+            y = round(h * i / GRID_STEPS)
+            strong = i == GRID_STEPS // 2
+            color = (255, 255, 255, 120 if strong else 70)
+            draw.line([(x, 0), (x, h)], fill=color, width=line_w)
+            draw.line([(0, y), (w, y)], fill=color, width=line_w)
+        size = max(9, round(min(w, h) / 32))
+        try:
+            font: Any = ImageFont.load_default(size=size)
+        except TypeError:  # ältere Pillow-Versionen ohne skalierbare Standardschrift
+            font = ImageFont.load_default()
+        pad = max(1, size // 6)
+        for i in range(GRID_STEPS + 1):
+            label = f"{i / GRID_STEPS:.1f}"
+            tw, th = _text_size(draw, label, font)
+            # x-Beschriftung oben, y-Beschriftung links (Ecke 0.0 nur einmal)
+            x = min(max(round(w * i / GRID_STEPS - tw / 2), 0), w - tw - 1)
+            _label(draw, (x, pad), label, font, tw, th, pad)
+            if i > 0:
+                y = min(max(round(h * i / GRID_STEPS - th / 2), 0), h - th - 1 - pad)
+                _label(draw, (pad, y), label, font, tw, th, pad)
+        merged = Image.alpha_composite(base.convert("RGBA"), layer).convert("RGB")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.stem + ".tmp.jpg")
+        merged.save(tmp, "JPEG", quality=90)
+        tmp.replace(out)
+        return out
+    except Exception as e:  # Gitter ist nur eine Hilfe – Frame dann ohne Gitter schicken
+        log.warning("editor: grid for frame %s failed (%s) – sending original", path, e)
+        return path
+
+
+def _text_size(draw: Any, text: str, font: Any) -> tuple[int, int]:
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    return int(right - left), int(bottom - top)
+
+
+def _label(draw: Any, xy: tuple[int, int], text: str, font: Any, tw: int, th: int, pad: int) -> None:
+    x, y = xy
+    draw.rectangle([x - pad, y - pad, x + tw + pad, y + th + pad], fill=(0, 0, 0, 140))
+    left, top, _, _ = draw.textbbox((0, 0), text, font=font)
+    draw.text((x - left, y - top), text, font=font, fill=(255, 255, 255, 230))
 
 
 def _select_frames(frames: list[FrameSample], max_frames: int) -> list[FrameSample]:
@@ -190,13 +286,21 @@ def _clip_context(c: CandidateIn, a: MediaAnalysis, examples: list[PerformanceEx
 
     lines += ["", "HARD LIMITS (enforced by code - anything outside is clipped or rejected)"]
     lines.append(f"- Source clip duration: {dur:.2f} s -> every timestamp must be within 0.00-{dur:.2f}")
+    lo, hi = _target_range(settings)
     lines.append(f"- Final length after trim and cuts: min {f.min_output_duration_s:.1f} s, max "
-                 f"{f.max_output_duration_s:.1f} s (ideal 12-40 s)")
+                 f"{f.max_output_duration_s:.1f} s (target {lo:g}-{hi:g} s)")
+    lines.append(f"- Shots: each at least {MIN_SHOT_S:.1f} s of kept time, gap-free from trim_start to trim_end, "
+                 f"zoom {SHOT_ZOOM_MIN:.1f}-{SHOT_ZOOM_MAX:.1f}, glitch at most {MAX_GLITCH}x, max {MAX_SHOTS} shots")
     lines.append(f"- Zooms: max {MAX_ZOOMS}, no overlaps, scale 1.15-1.35 (hard range 1.0-1.5)")
     lines.append(f"- Emojis: 1-{MAX_EMOJIS}, at most one per word; sound effects: 0-{MAX_SFX} in total, the "
-                 "automatic whoosh of each zoom included")
-    lines.append(f"- hook_text: max {HOOK_MAX_WORDS} words / {HOOK_MAX_CHARS} characters; highlight_words: 2-6")
-    lines.append(f"- Hashtags: 3-{MAX_HASHTAGS}, without '#', always include gta6")
+                 f"automatic whoosh of each zoom included; shake max {MAX_SHAKES}, flash max {MAX_FLASHES}")
+    lines.append(f"- Annotations: max {MAX_ANNOTATIONS}, each at least {MIN_ANNOTATION_S:.1f} s, boxes within "
+                 f"0-1, labels max {LABEL_MAX_WORDS} words")
+    lines.append(f"- hook_text: max {HOOK_MAX_WORDS} words / {HOOK_MAX_CHARS} characters (may be empty with "
+                 "hook_style none); highlight_words: 2-6")
+    lines.append(f"- word_colors: max {MAX_WORD_COLORS}; outro_text: max {OUTRO_MAX_WORDS} words / "
+                 f"{OUTRO_MAX_CHARS} characters")
+    lines.append(f"- Hashtags: 3-{PROMPT_HASHTAGS}, without '#', always include gta6; tags: 8-{MAX_TAGS}, without '#'")
     lines.append(f"- YouTube title: max {YT_TITLE_MAX} characters (ideal <= 70), contains \"GTA 6\"")
     if f.leak_policy == "reject":
         lines.append("- Leaked/unreleased GTA 6 footage: always rejected")
@@ -212,6 +316,7 @@ def _clip_context(c: CandidateIn, a: MediaAnalysis, examples: list[PerformanceEx
     lines.append(f"- Video: {info.width}x{info.height} @ {info.fps:.1f} fps, duration {info.duration:.2f} s, "
                  f"audio: {'yes' if info.has_audio else 'no'}")
     lines.append("- Suggested layout: " + _layout_text(a))
+    lines.append("- Shot kinds available: " + _shot_kinds_text(a))
     lines.append("- Music probability: " + ("not measured" if a.music_prob is None else f"{a.music_prob:.2f}"))
     lines.append(f"- Speech ratio: {a.speech_ratio * 100:.0f} %")
     peaks = sorted(p for p in a.loudness_peaks if _finite(p) is not None)
@@ -315,6 +420,41 @@ def _layout_text(a: MediaAnalysis) -> str:
     return s
 
 
+def _target_range(settings: Settings) -> tuple[float, float]:
+    """Ziel-Länge (filters.target_output_min_s/max_s), innerhalb der harten Grenzen."""
+    f = settings.config.filters
+    lo = _finite(getattr(f, "target_output_min_s", None), 12.0) or 12.0
+    hi = _finite(getattr(f, "target_output_max_s", None), 25.0) or 25.0
+    lo = max(lo, f.min_output_duration_s)
+    hi = min(max(hi, lo), f.max_output_duration_s)
+    return lo, hi
+
+
+def available_shot_kinds(a: MediaAnalysis) -> list[str]:
+    """face braucht eine Facecam-Box oder Gesichtserkennungen, split eine Facecam-Box (ohne sie rendert der
+    Renderer split als fit); gameplay/fit gehen immer."""
+    kinds = ["gameplay", "fit"]
+    if a.layout.facecam_box is not None:
+        kinds = ["split"] + kinds
+    if _has_face_info(a):
+        kinds = ["face"] + kinds
+    return kinds
+
+
+def _has_face_info(a: MediaAnalysis) -> bool:
+    return a.layout.facecam_box is not None or bool(a.layout.track) or any(fr.faces for fr in a.frames)
+
+
+def _shot_kinds_text(a: MediaAnalysis) -> str:
+    kinds = available_shot_kinds(a)
+    s = ", ".join(kinds)
+    if "face" not in kinds:
+        return s + " (no facecam or face detected - face and split are not possible)"
+    if a.layout.facecam_box is not None:
+        return s + " (face and split use the facecam box)"
+    return s + " (face uses the detected face; no facecam overlay - split is not possible)"
+
+
 def _transcript_text(tr: Transcript | None) -> str:
     if tr is None or not tr.segments:
         return "TRANSCRIPT: none (no speech detected or transcription unavailable)"
@@ -353,9 +493,14 @@ def sanitize_plan(plan: EditPlan, analysis: MediaAnalysis, settings: Settings) -
       klappt das nicht oder steht ein Slur in Hook/Titel/Beschreibung -> keep=False
     - is_leak_or_unreleased & leak_policy=reject -> keep=False; is_unsafe -> keep=False
     - virality_score < min_virality_score -> keep=False
-    - Titel: YouTube <= 100 Zeichen und mit "GTA 6", keine "#shorts"-Duplikate, keine @-Erwähnungen;
+    - Titel: YouTube <= 100 Zeichen und (bei GTA-Inhalten) mit "GTA 6", keine "#shorts"-Duplikate, keine @-Erwähnungen;
       Hashtags ohne '#', dedupliziert, max 8
-    - hook_text max 6 Wörter / 32 Zeichen"""
+    - hook_text max 6 Wörter / 32 Zeichen (bei hook_style "none" darf er leer sein; ohne Sprache am Anfang
+      wird "none" zu "banner")
+    - v2: shots sortiert, auf den Trim begrenzt, lückenlos ab trim_start, ohne Überlappung, min 0.6 s
+      behaltene Zeit, face/split ohne Gesichtsinfo bzw. split ohne Facecam-Box -> fit, zoom 1.0–1.6;
+      annotations auf den Trim begrenzt, Boxen in [0, 1] mit Mindestgröße; word_colors dedupliziert (max 12); outro_text max 8 Wörter /
+      48 Zeichen; debate_score 0–100; tags dedupliziert (max 15, ohne '#')"""
     f = settings.config.filters
     p = plan.model_copy(deep=True)
     words = analysis.transcript.words() if analysis.transcript is not None else []
@@ -389,7 +534,12 @@ def sanitize_plan(plan: EditPlan, analysis: MediaAnalysis, settings: Settings) -
         log.info("editor: %d slur word(s) in transcript, %d left in the kept part", len(slurs), len(slur_left))
 
     p.zooms = _sanitize_zooms(p.zooms, ts, te, ranges, _has_face(analysis))
-    p.emphasis = _sanitize_emphasis(p.emphasis, ts, te, ranges, words, p.zooms)
+    # ---- Edit-Engine v2: Shots/Annotationen (leer bleibt leer = v1)
+    p.shots = _sanitize_shots(p.shots, ts, te, ranges, _has_face_info(analysis),
+                              split_ok=analysis.layout.facecam_box is not None)
+    p.annotations = _sanitize_annotations(p.annotations, ts, te, ranges)
+    whoosh_starts = [sh.start for sh in p.shots if sh.transition in ("punch", "glitch")]
+    p.emphasis = _sanitize_emphasis(p.emphasis, ts, te, ranges, words, p.zooms, whoosh_starts)
 
     # ---- Layout nur übernehmen, wenn die Analyse es trägt
     p.layout = _sanitize_layout(p.layout, analysis)
@@ -409,22 +559,31 @@ def sanitize_plan(plan: EditPlan, analysis: MediaAnalysis, settings: Settings) -
     tiktok = _clean_title(p.titles.tiktok, SHORT_TITLE_MAX) or _clean_title(yt_title, SHORT_TITLE_MAX)
     instagram = _clean_title(p.titles.instagram, SHORT_TITLE_MAX) or _clean_title(yt_title, SHORT_TITLE_MAX)
     # YouTube-Suche läuft über den Titel -> "GTA 6" muss drinstehen (TikTok/IG: Hashtag gta6 reicht)
-    p.titles = PlatformText(youtube=_with_gta6(yt_title, YT_TITLE_MAX), tiktok=tiktok, instagram=instagram)
+    # Suchwort "GTA 6" nur bei GTA-Inhalten erzwingen (gleiche Regel wie #GTA6 in publish/text.py)
+    gta = _is_gta_plan(p, yt_title)
+    p.titles = PlatformText(youtube=_with_gta6(yt_title, YT_TITLE_MAX) if gta else yt_title, tiktok=tiktok,
+                            instagram=instagram)
     descs = {}
     for platform in ("youtube", "tiktok", "instagram"):
         body, tags = _clean_description(getattr(p.descriptions, platform), DESCRIPTION_MAX[platform])
         descs[platform] = body
         moved_tags += tags
     p.descriptions = PlatformText(**descs)
-    p.hashtags = [h for h in _clean_hashtags(list(p.hashtags) + moved_tags) if not _SLUR_RE.search(h)]
-    p.hook_text = _clean_hook(p.hook_text) or _clean_hook(yt_title)
+    p.hashtags = [h for h in _clean_hashtags(list(p.hashtags) + moved_tags, gta=gta) if not _SLUR_RE.search(h)]
+    p.hook_style, p.hook_text = _sanitize_hook(p.hook_style, p.hook_text, yt_title, words, ts, ranges)
     p.highlight_words = [w for w in _clean_highlights(p.highlight_words) if not _SLUR_RE.search(w)]
+    p.word_colors = _clean_word_colors(p.word_colors)
+    p.outro_text = _clean_outro(p.outro_text)
+    p.debate_score = int(round(_clamp(_finite(p.debate_score, 0.0), 0.0, 100.0)))
+    p.tags = _clean_tags(p.tags, gta=gta)
 
     # ---- harte Ablehnungen (erster Grund gewinnt; Claudes eigener Grund bleibt erhalten)
     texts = [p.hook_text, p.titles.youtube, p.titles.tiktok, p.titles.instagram, p.descriptions.youtube,
              p.descriptions.tiktok, p.descriptions.instagram]
     if any(_SLUR_RE.search(t or "") for t in texts):
         _reject(p, "Beleidigendes Wort (Slur) in Hook, Titel oder Beschreibung")
+    if _SLUR_RE.search(p.outro_text or ""):
+        _reject(p, "Beleidigendes Wort (Slur) in der Schlussfrage (outro_text)")
     if slur_left:
         _reject(p, "Beleidigendes Wort (Slur) im behaltenen Teil – die Untertitel würden es zeigen")
     if p.is_unsafe:
@@ -595,12 +754,17 @@ def _word_index(t: float, words: list[Word]) -> int | None:
 
 
 def _sanitize_emphasis(items: list[Emphasis], ts: float, te: float, ranges: list[tuple[float, float]],
-                       words: list[Word], zooms: list[Zoom] | None = None) -> list[Emphasis]:
+                       words: list[Word], zooms: list[Zoom] | None = None,
+                       transition_whooshes: list[float] | None = None) -> list[Emphasis]:
+    """transition_whooshes: Quellzeiten von punch/glitch-Übergängen (der Renderer spielt dort automatisch
+    einen whoosh; zählt nicht ins SFX-Budget, eigener whoosh direkt danach fällt aber weg)."""
     out: list[Emphasis] = []
     used_words: set[int] = set()
     emoji_times: list[float] = []
     zoom_starts = [z.start for z in zooms or []]
     n_sfx = len(zoom_starts)  # jeder Zoom bekommt im Renderer automatisch einen whoosh
+    auto_whooshes = zoom_starts + list(transition_whooshes or [])
+    n_shake = n_flash = 0
     for e in sorted(items, key=lambda e: _finite(e.t, -1.0)):
         t = _finite(e.t)
         if t is None or t < ts or t > te or _in_ranges(t, ranges):
@@ -617,8 +781,8 @@ def _sanitize_emphasis(items: list[Emphasis], ts: float, te: float, ranges: list
                     used_words.add(wi)
         sfx = e.sfx
         merged = False
-        if sfx == "whoosh" and zoom_starts:
-            gap = min(abs(t - zs) for zs in zoom_starts)
+        if sfx == "whoosh" and auto_whooshes:
+            gap = min(abs(t - zs) for zs in auto_whooshes)
             if gap < ZOOM_WHOOSH_MERGE_S:
                 merged = True  # verschmilzt im Renderer mit dem Zoom-whoosh, zählt nicht extra
             elif gap < ZOOM_WHOOSH_GAP_S:
@@ -628,10 +792,233 @@ def _sanitize_emphasis(items: list[Emphasis], ts: float, te: float, ranges: list
                 sfx = None
             else:
                 n_sfx += 1
-        if emoji is None and sfx is None:
+        shake = bool(e.shake) and n_shake < MAX_SHAKES
+        flash = bool(e.flash) and n_flash < MAX_FLASHES
+        n_shake += shake
+        n_flash += flash
+        if emoji is None and sfx is None and not shake and not flash:
             continue
-        out.append(Emphasis(t=round(t, 3), emoji=emoji, sfx=sfx))
+        out.append(Emphasis(t=round(t, 3), emoji=emoji, sfx=sfx, shake=shake, flash=flash))
     return out
+
+
+# ---- Edit-Engine v2
+
+
+def _clean_box(b: Box | None, min_size: float = MIN_BOX) -> Box | None:
+    """Box auf [0, 1] begrenzen (Schnittmenge mit dem Bild), negative Breite/Höhe umdrehen, zu kleine Boxen
+    um ihre Mitte auf min_size vergrößern. Box komplett außerhalb oder ungültig -> None."""
+    if b is None:
+        return None
+    x, y, w, h = _finite(b.x), _finite(b.y), _finite(b.w), _finite(b.h)
+    if x is None or y is None or w is None or h is None:
+        return None
+    if w < 0:
+        x, w = x + w, -w
+    if h < 0:
+        y, h = y + h, -h
+    x0, y0, x1, y1 = max(x, 0.0), max(y, 0.0), min(x + w, 1.0), min(y + h, 1.0)
+    if x1 < x0 or y1 < y0 or (x1 - x0 == 0 and w > 0) or (y1 - y0 == 0 and h > 0):
+        return None  # liegt komplett außerhalb des Bildes
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    w2, h2 = max(x1 - x0, min_size), max(y1 - y0, min_size)
+    nx = _clamp(cx - w2 / 2, 0.0, 1.0 - w2)
+    ny = _clamp(cy - h2 / 2, 0.0, 1.0 - h2)
+    return Box(x=round(nx, 4), y=round(ny, 4), w=round(w2, 4), h=round(h2, 4))
+
+
+def _same_framing(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return a["kind"] == b["kind"] and a["zoom"] == b["zoom"] and a["focus"] == b["focus"]
+
+
+def _sanitize_shots(shots: list[Shot], ts: float, te: float, ranges: list[tuple[float, float]],
+                    face_ok: bool, split_ok: bool | None = None) -> list[Shot]:
+    """Shots lückenlos über [ts, te]: sortiert, Überlappungen entfernt, Lücken geschlossen (der vorige Shot
+    läuft bis zum nächsten), zu kurze Shots (behaltene Zeit < MIN_SHOT_S) gehen im Nachbarn auf."""
+    if not shots or te - ts <= 0:
+        return []
+    if split_ok is None:
+        split_ok = face_ok
+    items: list[dict[str, Any]] = []
+    for sh in shots:
+        s, e = _finite(sh.start), _finite(sh.end)
+        if s is None or e is None:
+            continue
+        if e < s:
+            s, e = e, s
+        s, e = max(s, ts), min(e, te)
+        if e - s <= 1e-6:
+            continue
+        kind = sh.kind if (face_ok or sh.kind not in ("face", "split")) else "fit"
+        if kind == "split" and not split_ok:
+            kind = "fit"  # split braucht eine Facecam-Box (Renderer zeigt sonst ohnehin fit)
+        zoom = round(_clamp(_finite(sh.zoom, 1.0), SHOT_ZOOM_MIN, SHOT_ZOOM_MAX), 3)
+        items.append({"start": s, "end": e, "kind": kind, "focus": _clean_box(sh.focus), "zoom": zoom,
+                      "transition": sh.transition})
+    items.sort(key=lambda d: (d["start"], d["end"]))
+    seq: list[dict[str, Any]] = []
+    for it in items:  # Überlappung: späterer Shot beginnt erst am Ende des vorigen
+        if seq and it["start"] < seq[-1]["end"]:
+            it["start"] = seq[-1]["end"]
+        if it["end"] - it["start"] > 1e-6:
+            seq.append(it)
+    if not seq:
+        return []
+    seq[0]["start"] = ts
+    for a, b in zip(seq, seq[1:], strict=False):
+        a["end"] = b["start"]
+    seq[-1]["end"] = te
+
+    merged: list[dict[str, Any]] = []
+    for it in seq:  # zu kurz oder gleiche Einstellung per harter Schnitt -> im vorigen Shot aufgehen
+        if merged and (_kept_overlap(it["start"], it["end"], ranges) < MIN_SHOT_S
+                       or (_same_framing(merged[-1], it) and it["transition"] == "cut")):
+            merged[-1]["end"] = it["end"]
+            continue
+        merged.append(it)
+    if len(merged) > 1 and _kept_overlap(merged[0]["start"], merged[0]["end"], ranges) < MIN_SHOT_S:
+        # erster Shot = stärkstes Bild (meist das Gesicht): lieber verlängern als im Nachfolger aufgehen
+        t = _cut_point(merged[0]["start"], te, ranges, MIN_SHOT_S)
+        if _kept_overlap(t, merged[1]["end"], ranges) >= MIN_SHOT_S:
+            merged[0]["end"] = merged[1]["start"] = t
+    if len(merged) > 1 and _kept_overlap(merged[0]["start"], merged[0]["end"], ranges) < MIN_SHOT_S:
+        merged[1]["start"] = merged[0]["start"]
+        merged.pop(0)
+    if len(merged) > MAX_SHOTS:
+        merged = merged[:MAX_SHOTS]
+        merged[-1]["end"] = te
+
+    out: list[Shot] = []
+    n_glitch = 0
+    bounds = [round(m["start"], 3) for m in merged] + [round(te, 3)]
+    for i, m in enumerate(merged):
+        tr = m["transition"] if i > 0 else "cut"  # erster Frame ohne Übergang (stärkstes Bild sofort)
+        if tr == "glitch":
+            n_glitch += 1
+            if n_glitch > MAX_GLITCH:
+                tr = "cut"
+        out.append(Shot(start=bounds[i], end=bounds[i + 1], kind=m["kind"], focus=m["focus"], zoom=m["zoom"],
+                        transition=tr))
+    return out
+
+
+def _sanitize_annotations(items: list[Annotation], ts: float, te: float,
+                          ranges: list[tuple[float, float]]) -> list[Annotation]:
+    out: list[Annotation] = []
+    for a in sorted(items, key=lambda a: _finite(a.start, 0.0)):
+        s, e = _finite(a.start), _finite(a.end)
+        if s is None or e is None:
+            continue
+        if e < s:
+            s, e = e, s
+        s, e = max(s, ts), min(e, te)
+        if e - s < MIN_ANNOTATION_S or _kept_overlap(s, e, ranges) < MIN_ANNOTATION_S:
+            continue
+        box = _clean_box(a.box)
+        if box is None:
+            continue
+        out.append(Annotation(start=round(s, 3), end=round(e, 3), kind=a.kind, box=box, color=a.color,
+                              label=_clean_label(a.label)))
+        if len(out) >= MAX_ANNOTATIONS:
+            break
+    return out
+
+
+def _clean_label(text: str | None) -> str | None:
+    t = _strip_symbols(_MENTION_RE.sub("", text or ""))
+    t = re.sub(r"\s+", " ", t).strip().strip('"“”\'')
+    if not t or _SLUR_RE.search(t):
+        return None
+    words = t.split()[:LABEL_MAX_WORDS]
+    while len(words) > 1 and len(" ".join(words)) > LABEL_MAX_CHARS:
+        words.pop()
+    return " ".join(words)[:LABEL_MAX_CHARS].rstrip(" ,;:-–—") or None
+
+
+def _color_key(word: str) -> str:
+    """Vergleichsform wie im Caption-Renderer: klein, ohne Leer-/Satzzeichen ("GTA 6" == "gta6")."""
+    return re.sub(r"[\W_]", "", word.lower())
+
+
+def _clean_word_colors(items: list[WordColor]) -> list[WordColor]:
+    out: list[WordColor] = []
+    seen: set[str] = set()
+    for wc in items:
+        word = re.sub(r"\s+", " ", _strip_symbols(str(wc.word or ""))).strip().strip(".,!?;:\"'()[]{}…“”‘’*")
+        if not word or len(word) > WORD_COLOR_MAX_CHARS or len(word.split()) > 4 or _SLUR_RE.search(word):
+            continue
+        key = _color_key(word)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(WordColor(word=word, color=wc.color))
+        if len(out) >= MAX_WORD_COLORS:
+            break
+    return out
+
+
+def _clean_outro(text: str | None) -> str | None:
+    """Schlussfrage: eine Zeile, ohne Emojis/Hashtags/@, max OUTRO_MAX_WORDS Wörter / OUTRO_MAX_CHARS Zeichen."""
+    raw = text or ""
+    t = re.sub(r"(?<![\w&])#\w+", "", _MENTION_RE.sub("", raw))
+    t = _GTA6_VARIANT_RE.sub("GTA 6", _strip_symbols(t))
+    t = re.sub(r"\s+", " ", t).strip().strip('"“”\'')
+    words = t.split()
+    cut = words[:OUTRO_MAX_WORDS]
+    while len(cut) > 1 and len(" ".join(cut)) > OUTRO_MAX_CHARS:
+        cut.pop()
+    out = " ".join(cut)[:OUTRO_MAX_CHARS].rstrip(" ,;:-–—")
+    if out and out != t and "?" in t and not out.endswith("?"):  # gekürzte Frage bleibt eine Frage
+        out = (out if len(out) < OUTRO_MAX_CHARS else out[:-1].rstrip()) + "?"
+    return out or None
+
+
+def _clean_tags(tags: list[str], gta: bool = True) -> list[str]:
+    """YouTube-Tags: ohne '#', ohne Zeichen, die YouTube ablehnt (<, >, Komma, Anführungszeichen),
+    dedupliziert, max MAX_TAGS und TAGS_TOTAL_MAX Zeichen insgesamt."""
+    out: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for tag in tags:
+        t = _MENTION_RE.sub("", str(tag or "")).replace("#", " ")
+        t = _strip_symbols(re.sub(r"[<>\",;|]", " ", t))
+        t = re.sub(r"\s+", " ", t).strip(" -_.'")
+        if not t or len(t) > TAG_MAX_CHARS or _URL_RE.match(t) or _SLUR_RE.search(t):
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        if total + len(t) > TAGS_TOTAL_MAX:
+            break
+        seen.add(key)
+        total += len(t) + 1
+        out.append(t)
+        if len(out) >= MAX_TAGS:
+            break
+    if gta and out and not any(_GTA6_VARIANT_RE.search(t) or t.lower() in ("gta6", "gtavi") for t in out):
+        out = ["gta 6"] + out[:MAX_TAGS - 1]  # wichtigstes Suchwort fehlt
+    return out
+
+
+def _speech_at_start(words: list[Word], ts: float, ranges: list[tuple[float, float]]) -> bool:
+    """Wird kurz nach trim_start (behaltene Zeit) gesprochen?"""
+    for w in words:
+        s, e = _finite(w.start), _finite(w.end)
+        if s is None or e is None or not (w.text or "").strip():
+            continue
+        if e > ts and s < ts + HOOK_SPOKEN_WINDOW_S and _kept_overlap(max(s, ts), e, ranges) > 0.05:
+            return True
+    return False
+
+
+def _sanitize_hook(style: str, hook_text: str | None, title: str, words: list[Word], ts: float,
+                   ranges: list[tuple[float, float]]) -> tuple[Any, str]:
+    """hook_style "none" nur, wenn am Anfang wirklich gesprochen wird (sonst hätte der Clip gar keinen Hook);
+    bei "banner" braucht es einen Hook-Text (Fallback: Titel)."""
+    hook = _clean_hook(hook_text)
+    if style == "none" and _speech_at_start(words, ts, ranges):
+        return "none", hook
+    return "banner", hook or _clean_hook(title)
 
 
 # ---- Emoji / Text
@@ -720,6 +1107,14 @@ def _clean_title(title: str | None, max_len: int) -> str:
     return _cut_words(t, max_len)
 
 
+def _is_gta_plan(p: EditPlan, yt_title: str) -> bool:
+    """Erwähnen Titel, Hook, Beschreibungen, Hashtags oder Tags GTA? (Kanal ist GTA-6-only, andere Spiele
+    lehnt der Prompt ab – fremde Inhalte bekommen aber nie ein irreführendes "GTA 6" angehängt.)"""
+    parts = [yt_title, p.titles.tiktok, p.titles.instagram, p.hook_text, p.descriptions.youtube,
+             p.descriptions.tiktok, p.descriptions.instagram, *p.hashtags, *p.tags]
+    return any(_GTA_ANY_RE.search(t or "") for t in parts)
+
+
 def _with_gta6(title: str, max_len: int) -> str:
     """Hängt " | GTA 6" an, wenn der Titel das Suchwort nicht enthält (kürzt dafür notfalls)."""
     if not title or _GTA6_PRESENT_RE.search(title):
@@ -746,7 +1141,7 @@ def _clean_description(body: str | None, max_len: int) -> tuple[str, list[str]]:
     return _cut_words(text, max_len), tags
 
 
-def _clean_hashtags(tags: list[str]) -> list[str]:
+def _clean_hashtags(tags: list[str], gta: bool = True) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for tag in tags:
@@ -758,7 +1153,7 @@ def _clean_hashtags(tags: list[str]) -> list[str]:
             continue
         seen.add(key)
         out.append(t)
-    if "gta6" not in seen:
+    if gta and "gta6" not in seen:
         out.insert(0, "gta6")
     return out[:MAX_HASHTAGS]
 

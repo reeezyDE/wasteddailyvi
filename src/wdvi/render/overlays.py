@@ -1,4 +1,5 @@
-"""PNG-Overlays mit Pillow: Hook-Titel, Credit-Tag, Wasserzeichen, Emojis (Twemoji, CC-BY 4.0)."""
+"""PNG-Overlays mit Pillow: Hook-Titel, Schlussfrage (Outro), Credit-Tag, Wasserzeichen, Emojis
+(Twemoji, CC-BY 4.0)."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import os
 import re
 import threading
 import time
+from itertools import pairwise
 from pathlib import Path
 
 import httpx
@@ -15,6 +17,10 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from wdvi.config import Settings
 from wdvi.render import _fonts
+from wdvi.render.captions import COLOR_HEX, match_word_colors, resolve_color
+
+__all__ = ["COLOR_HEX", "emoji_png", "render_credit_png", "render_hook_png", "render_outro_png",
+           "render_watermark_png", "split_emojis"]
 
 log = logging.getLogger(__name__)
 
@@ -135,9 +141,15 @@ def emoji_png(emoji: str, size: int, cache_dir: Path) -> Path | None:
             if svg is None:
                 continue
             png = edir / f"{name}_{int(size)}.png"
-            import cairosvg  # erst hier: braucht libcairo
+            try:
+                import cairosvg  # erst hier: braucht libcairo (unter Windows oft nicht vorhanden)
 
-            data = cairosvg.svg2png(bytestring=svg, output_width=int(size), output_height=int(size))
+                data = cairosvg.svg2png(bytestring=svg, output_width=int(size), output_height=int(size))
+            except (ImportError, OSError) as e:
+                data = _png_fallback(name, int(size))  # fertiges 72-px-PNG hochskalieren
+                if data is None:
+                    raise
+                log.info("cairosvg unavailable (%s) - using Twemoji PNG for %s", e, name)
             tmp = png.with_name(png.name + ".tmp")
             tmp.write_bytes(data)
             os.replace(tmp, png)
@@ -153,6 +165,21 @@ def emoji_png(emoji: str, size: int, cache_dir: Path) -> Path | None:
         except Exception:
             pass
     return None
+
+
+def _png_fallback(name: str, size: int) -> bytes | None:
+    """Twemoji-72x72-PNG laden und auf size px skalieren (ohne libcairo). None, wenn nicht vorhanden."""
+    import io
+
+    url = TWEMOJI_URL.format(name=name).replace("/svg/", "/72x72/").replace(".svg", ".png")
+    with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=True) as client:
+        r = client.get(url)
+    if r.status_code != 200 or not r.content.startswith(b"\x89PNG"):
+        return None
+    with Image.open(io.BytesIO(r.content)) as im:
+        out = io.BytesIO()
+        im.convert("RGBA").resize((size, size), Image.LANCZOS).save(out, "PNG")
+    return out.getvalue()
 
 
 def _fetch_svg(name: str, edir: Path) -> bytes | None:
@@ -340,6 +367,223 @@ def render_hook_png(text: str, settings: Settings, out: Path, *, compact: bool =
             x += font.getlength(tok)
         y += line_h + line_gap
     return _save(img, out)
+
+
+# --------------------------------------------------------------------------- Outro (Schlussfrage)
+
+OUTRO_MAX_W = 0.88  # Panelbreite max. 88 % der Bildbreite
+OUTRO_MAX_SIZE = 0.105  # max. Schriftgröße (Anteil der Bildbreite)
+OUTRO_MAX_LINES = 3
+OUTRO_TAB = "COMMENT BELOW"
+_OUTRO_STOP = {"a", "an", "the", "and", "or", "of", "to", "in", "on", "is", "it", "at", "for", "with", "you", "your",
+               "i", "we", "he", "she", "they", "be", "do", "does", "did", "would", "will", "should", "could", "can",
+               "are", "was", "were", "this", "that", "than", "what", "who", "which", "why", "how", "when", "more",
+               "better", "best", "worse", "worst", "really", "actually", "ever", "now", "my", "his", "her", "if",
+               "der", "die", "das", "ist", "und", "oder", "wer", "wie", "besser", "als"}
+
+
+def _partitions(n: int, k: int):
+    """Alle Aufteilungen von n Tokens in k nicht leere, aufeinanderfolgende Zeilen (Grenzindizes)."""
+    if k == 1:
+        yield [0, n]
+        return
+    if k == 2:
+        for a in range(1, n):
+            yield [0, a, n]
+        return
+    for a in range(1, n - 1):
+        for b in range(a + 1, n):
+            yield [0, a, b, n]
+
+
+def _outro_colors(tokens: list[tuple[str, bool]], brand, word_colors) -> list[str | None]:
+    """'#RRGGBB' je Token oder None (weiß). Erst word_colors (Bedeutungsfarben), sonst automatisch die
+    1–2 stärksten Schlüsselwörter in Markenfarben (pink, dann orange)."""
+    words = [t if not e else "" for t, e in tokens]
+    named = match_word_colors(words, word_colors) if word_colors else [None] * len(tokens)
+    if any(named):
+        return [resolve_color(c, brand) if c and c != "white" else None for c in named]
+    cands = []
+    for i, (tok, is_emoji) in enumerate(tokens):
+        key = re.sub(r"[\W_]", "", tok.lower())
+        if is_emoji or not key or key in _OUTRO_STOP or key.isdigit():
+            continue
+        weight = len(key)
+        if i + 1 < len(tokens) and tokens[i + 1][0].strip("?!.,").isdigit():
+            weight += 2  # "GTA 6", "PS 5": Eigennamen mit Zahl sind fast immer das Thema
+        if weight < 4:
+            continue
+        cands.append((-weight, i))
+    picked = sorted(i for _, i in sorted(cands)[:2])
+    out: list[str | None] = [None] * len(tokens)
+    for n, i in enumerate(picked):
+        out[i] = brand.color_primary if n == 0 else brand.color_secondary
+    # "GTA 6": Zahl direkt hinter einem farbigen Wort bekommt dieselbe Farbe
+    for i in range(1, len(tokens)):
+        if out[i] is None and out[i - 1] and tokens[i][0].strip("?!.,").isdigit():
+            out[i] = out[i - 1]
+    return out
+
+
+def render_outro_png(text: str, settings: Settings, out: Path, *, word_colors=None) -> Path:
+    """Schlussfrage als große Karte (für Kommentare): dunkles Glas-Panel mit Marken-Verlaufsrand und Farb-Glow,
+    Reiter "COMMENT BELOW", Frage in font_hook (Großbuchstaben, bis 3 Zeilen, auto-skaliert), Schlüsselwörter
+    farbig (word_colors wie bei den Captions, sonst automatisch in Markenfarben). Bewusst anders als die
+    Hook-Pille (kein Vollverlauf). RGBA, Breite = render.width."""
+    cfg = settings.config
+    brand = cfg.brand
+    W = int(cfg.render.width)
+    fpath = str(_fonts.font_path(cfg.paths.fonts_dir, brand.font_hook))
+    checker = _fonts.GlyphChecker(_fonts.load(fpath, 64))
+
+    raw = " ".join((text or "").split()).upper()
+    tokens = [(tok if is_e else checker.filter(tok), is_e) for tok, is_e in _hook_tokens(raw)]
+    tokens = [t for t in tokens if t[0] and (not t[1] or emoji_png(t[0], 72, cfg.paths.cache_dir) is not None)]
+    if not tokens:
+        tokens = [("WHAT DO YOU THINK?", False)]
+    colors = _outro_colors(tokens, brand, word_colors)
+
+    panel_max_w = round(W * OUTRO_MAX_W)
+    pad_x = round(W * 0.06)
+    avail = panel_max_w - 2 * pad_x
+    max_size, min_size = round(W * OUTRO_MAX_SIZE), max(12, round(W * 0.03))
+
+    def widths(bounds, size: int) -> list[float]:
+        font = _fonts.load(fpath, size)
+        stroke = max(1, round(size * 0.035))
+        return [_line_width(tokens[a:b], font, round(size * 0.9), stroke) for a, b in pairwise(bounds)]
+
+    # je Zeilenzahl: ausgewogenste Aufteilung, dann größte passende Schrift; weniger Zeilen leicht bevorzugt
+    best: tuple[float, list[int], int] | None = None
+    ref = 100
+    for k in range(1, min(OUTRO_MAX_LINES, len(tokens)) + 1):
+        parts = list(_partitions(len(tokens), k))
+        # keine Zeile nur aus einem Emoji
+        parts = [bnd for bnd in parts if not any(b - a == 1 and tokens[a][1] for a, b in pairwise(bnd))] or parts
+        bounds = min(parts, key=lambda bnd: max(widths(bnd, ref)))
+        lo, hi = min_size, max_size
+        if max(widths(bounds, lo)) > avail:
+            continue
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if max(widths(bounds, mid)) <= avail:
+                lo = mid
+            else:
+                hi = mid - 1
+        score = lo * (1.0, 0.88, 0.72)[k - 1]
+        if best is None or score > best[0]:
+            best = (score, bounds, lo)
+    bounds, size = (best[1], best[2]) if best else ([0, len(tokens)], min_size)
+
+    font = _fonts.load(fpath, size)
+    stroke = max(1, round(size * 0.035))
+    emoji_px = round(size * 0.9)
+    cap_top = font.getbbox("H")[1]
+    cap_h = font.getbbox("H")[3] - cap_top
+    line_gap = round(size * 0.26)
+    line_h = cap_h + 2 * stroke
+    lines = [list(range(a, b)) for a, b in pairwise(bounds)]
+    line_ws = widths(bounds, size)
+    text_h = len(lines) * line_h + (len(lines) - 1) * line_gap
+
+    tab_size = max(12, round(W * 0.03))
+    tab_font = _fonts.load(str(_fonts.font_path(cfg.paths.fonts_dir, brand.font_captions)), tab_size)
+    tab_text = _fonts.GlyphChecker(tab_font).filter(OUTRO_TAB)
+    tab_h = round(tab_size * 1.9)
+    tab_w = round(tab_font.getlength(tab_text) + tab_size * 1.6)
+
+    pad_top = round(tab_h * 0.5 + size * 0.42)
+    pad_bot = round(size * 0.5)
+    panel_w = max(min(panel_max_w, round(max(line_ws) + 2 * pad_x)), tab_w + 2 * round(W * 0.05), round(W * 0.6))
+    panel_h = round(text_h + pad_top + pad_bot)
+    radius = round(W * 0.05)
+    border = max(3, round(W * 0.0055))
+
+    margin = round(W * 0.06)  # Platz für Glow/Schatten
+    img_h = panel_h + tab_h // 2 + 2 * margin
+    img = Image.new("RGBA", (W, img_h), (0, 0, 0, 0))
+    px0 = (W - panel_w) // 2
+    py0 = margin + tab_h // 2
+
+    # Farb-Glow + weicher Schatten
+    mask = _rounded_mask(panel_w, panel_h, radius)
+    glow = Image.new("L", (W, img_h), 0)
+    glow.paste(mask.point(lambda v: v * 150 // 255), (px0, py0))
+    glow = glow.filter(ImageFilter.GaussianBlur(round(W * 0.03)))
+    img.paste(Image.new("RGBA", (W, img_h), (*_rgb(brand.color_primary), 255)), (0, 0), glow)
+    shadow = Image.new("L", (W, img_h), 0)
+    shadow.paste(mask.point(lambda v: v * 170 // 255), (px0, py0 + round(W * 0.012)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(round(W * 0.016)))
+    img.alpha_composite(_solid_with_alpha((0, 0, 0), shadow))
+
+    # Rand: Markenverlauf; innen dunkles Glas mit leichtem Glanz oben
+    outer = _rounded_mask(panel_w + 2 * border, panel_h + 2 * border, radius + border)
+    ring = _gradient(panel_w + 2 * border, panel_h + 2 * border, _rgb(brand.color_primary),
+                     _rgb(brand.color_secondary)).convert("RGBA")
+    img.paste(ring, (px0 - border, py0 - border), outer)
+    glass = np.zeros((panel_h, panel_w, 4), np.float32)
+    t = np.linspace(0.0, 1.0, panel_h, dtype=np.float32)[:, None]
+    glass[..., 0] = 26 - 12 * t
+    glass[..., 1] = 22 - 10 * t
+    glass[..., 2] = 34 - 14 * t
+    glass[..., 3] = 255
+    hl = np.clip(1.0 - t / 0.45, 0, 1) * 18  # Glanz oben
+    glass[..., :3] += hl[..., None]
+    glass_img = Image.fromarray(np.clip(glass, 0, 255).astype(np.uint8), "RGBA")
+    img.paste(glass_img, (px0, py0), mask)
+
+    # Reiter oben mittig (Markenfarbe, dunkle Schrift)
+    tx0 = (W - tab_w) // 2
+    ty0 = py0 - tab_h // 2
+    tab_mask = _rounded_mask(tab_w, tab_h, tab_h // 2)
+    img.paste(Image.new("RGBA", (tab_w, tab_h), (*_rgb(brand.color_outline), 255)), (tx0, ty0),
+              tab_mask)
+    inner = 3
+    tab_in = _gradient(tab_w - 2 * inner, tab_h - 2 * inner, _rgb(brand.color_primary),
+                       _rgb(brand.color_secondary)).convert("RGBA")
+    img.paste(tab_in, (tx0 + inner, ty0 + inner), _rounded_mask(tab_w - 2 * inner, tab_h - 2 * inner,
+                                                                (tab_h - 2 * inner) // 2))
+    draw = ImageDraw.Draw(img)
+    tb = tab_font.getbbox("H")
+    draw.text(((W - tab_font.getlength(tab_text)) / 2, ty0 + (tab_h - (tb[3] - tb[1])) / 2 - tb[1]), tab_text,
+              font=tab_font, fill=(255, 255, 255, 255))
+
+    # Frage: weiß, Schlüsselwörter farbig, feine Kontur + weicher Schatten
+    txt = Image.new("RGBA", (W, img_h), (0, 0, 0, 0))
+    tdraw = ImageDraw.Draw(txt)
+    shadow_layer = Image.new("RGBA", (W, img_h), (0, 0, 0, 0))
+    sdraw = ImageDraw.Draw(shadow_layer)
+    y = py0 + pad_top + stroke
+    space = font.getlength(" ") + stroke
+    for idx, lw in zip(lines, line_ws, strict=True):
+        x = (W - lw) / 2 + stroke
+        for n, i in enumerate(idx):
+            tok, is_emoji = tokens[i]
+            if n:
+                x += space
+            if is_emoji:
+                em = _emoji_image(tok, emoji_px, settings)
+                if em is not None:
+                    txt.alpha_composite(em, (round(x), round(y + cap_h / 2 - emoji_px / 2)))
+                x += emoji_px
+                continue
+            ty = y - cap_top
+            fill = _rgb(colors[i]) if colors[i] else _rgb(brand.color_text)
+            sdraw.text((x, ty + round(size * 0.05)), tok, font=font, fill=(0, 0, 0, 200), stroke_width=stroke,
+                       stroke_fill=(0, 0, 0, 200))
+            tdraw.text((x, ty), tok, font=font, fill=(*fill, 255), stroke_width=stroke,
+                       stroke_fill=(*_rgb(brand.color_outline), 255))
+            x += font.getlength(tok)
+        y += line_h + line_gap
+    img.alpha_composite(shadow_layer.filter(ImageFilter.GaussianBlur(max(1, round(size * 0.04)))))
+    img.alpha_composite(txt)
+    return _save(img, out)
+
+
+def _solid_with_alpha(rgb: tuple[int, int, int], alpha: Image.Image) -> Image.Image:
+    layer = Image.new("RGBA", alpha.size, (*rgb, 0))
+    layer.putalpha(alpha)
+    return layer
 
 
 # --------------------------------------------------------------------------- Credit / Wasserzeichen

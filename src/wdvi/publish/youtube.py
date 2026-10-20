@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from datetime import timedelta
@@ -51,6 +52,8 @@ RETRY_STATUSES = {500, 502, 503, 504}
 PENDING_TTL_S = 3600  # offene OAuth-Vorgänge (PKCE-Verifier) 1 h aufheben
 SCHEDULE_MIN_LEAD = timedelta(minutes=1)  # publishAt muss sicher in der Zukunft liegen
 TAGS_MAX_CHARS = 450  # YouTube-Limit 500 (inkl. Trennzeichen/Anführungszeichen)
+TAG_MAX_LEN = 60  # einzelnes Keyword (YouTube erlaubt mehr, lange Tags bringen nichts)
+_TAG_BAD_RE = re.compile(r"[<>\"',#\x00-\x1f\x7f]")
 
 AUDIT_HINT = (
     "Hinweis: Uploads aus nicht geprüften Google-API-Projekten werden von YouTube auf 'privat' "
@@ -158,6 +161,36 @@ def _is_http_error(e: BaseException) -> bool:
     except ImportError:  # pragma: no cover
         return False
     return isinstance(e, HttpError)
+
+
+def _clean_tag(raw: object) -> str:
+    """Keyword für snippet.tags: ohne '#', '<', '>', Kommas, Anführungszeichen; Leerzeichen bleiben
+    ("gta 6 trailer"). Reine Zahlen -> ''."""
+    t = " ".join(_TAG_BAD_RE.sub(" ", str(raw or "")).split())
+    if not t or t.replace(" ", "").isdigit():
+        return ""
+    return t[:TAG_MAX_LEN].strip()
+
+
+def youtube_tags(values: list[str], *, gta: bool, max_chars: int = TAGS_MAX_CHARS) -> list[str]:
+    """snippet.tags: Plan-Tags/Hashtags in Reihenfolge, dedupliziert (Groß-/Kleinschreibung und Leerzeichen
+    egal), "GTA6" zuerst nur bei GTA-Inhalten, insgesamt <= max_chars (YouTube zählt Kommas mit und Tags mit
+    Leerzeichen in Anführungszeichen; Limit 500)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for raw in [text.REQUIRED_HASHTAG, *values] if gta else list(values):
+        t = _clean_tag(raw)
+        key = t.replace(" ", "").casefold()
+        if not t or key in seen:
+            continue
+        cost = len(t) + (2 if " " in t else 0) + (1 if out else 0)
+        if used + cost > max_chars:
+            continue  # kürzere Tags dahinter passen evtl. noch
+        seen.add(key)
+        out.append(t)
+        used += cost
+    return out
 
 
 class YouTubePublisher:
@@ -353,14 +386,9 @@ class YouTubePublisher:
         description = text.truncate(
             text.youtube_safe(req.description or ""), text.DESCRIPTION_LIMITS["youtube"], text.utf8_len
         )
-        tags: list[str] = []
-        used = 0
-        for t in text.normalize_hashtags(req.hashtags, limit=30):
-            cost = len(t) + 1 + (2 if " " in t else 0)
-            if used + cost > TAGS_MAX_CHARS:
-                break
-            tags.append(t)
-            used += cost
+        # req.hashtags enthält bei YouTube Plan-Tags (Keywords) + Hashtags (Pipeline._post_hashtags)
+        gta = text.is_gta_content(req.title, req.hashtags, req.description) or not req.hashtags
+        tags = youtube_tags(list(req.hashtags), gta=gta)
         status: dict[str, Any] = {"selfDeclaredMadeForKids": bool(self.cfg.made_for_kids)}
         scheduled = False
         if (

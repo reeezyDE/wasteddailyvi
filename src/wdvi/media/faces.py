@@ -8,6 +8,7 @@ import threading
 import time
 from pathlib import Path
 from statistics import median
+from typing import Literal
 
 import cv2
 import httpx
@@ -43,6 +44,18 @@ CAM_W_MIN, CAM_W_MAX = 0.16, 0.42
 EDGE_SNAP = 0.08
 GAMEPLAY_MARGIN = 0.02
 TRACK_OUTLIER = 0.20
+TRACK_MIN_POINTS = 2  # Gesichts-Track auch ohne face_track-Layout, wenn mind. so viele stabile Punkte da sind
+
+# Freigestellte Facecam ("cutout": Greenscreen-Streamer sitzt ohne Rahmen über dem Gameplay)
+CUTOUT_MIN_FACE_H = 0.18  # Gesichtshöhe (Anteil Bildhöhe) ab der kein kleiner Webcam-Rahmen mehr passt
+CUTOUT_W_FACTOR = 2.6  # Kopf + Schultern ≈ 2,6x Gesichtsbreite
+CUTOUT_H_FACTOR = 2.2  # ≈ 2,2x Gesichtshöhe, überwiegend nach unten (Oberkörper)
+CUTOUT_HEADROOM = 0.35  # Platz über der Stirn in Gesichtshöhen
+CUTOUT_BOTTOM_SNAP = 0.25  # Oberkörper reicht bis zum unteren Bildrand, wenn der Rahmen so nah dran ist
+CUTOUT_W_MAX = 0.60
+CUTOUT_TOL_FACTOR = 0.5  # freigestellte Streamer bewegen sich mehr -> Cluster-Toleranz ~ halbe Gesichtsbreite
+
+CamStyle = Literal["frame", "cutout", "none"]  # Webcam-Rahmen | freigestellter Streamer | keine Facecam
 
 _download_lock = threading.Lock()
 _download_failed_at: float | None = None
@@ -200,19 +213,21 @@ def _facecam_cluster(per_sample: list[tuple[float, list[FaceDet]]]) -> dict[int,
     if not small:
         return {}
 
-    def supporters(cx: float, cy: float) -> dict[int, FaceDet]:
+    def supporters(cx: float, cy: float, fw: float) -> dict[int, FaceDet]:
+        tol = max(FACECAM_CLUSTER_TOL, CUTOUT_TOL_FACTOR * fw)
         res: dict[int, FaceDet] = {}
         for i, f in small:
             dx, dy = abs(f.box.cx - cx), abs(f.box.cy - cy)
-            if dx <= FACECAM_CLUSTER_TOL and dy <= FACECAM_CLUSTER_TOL:
+            if dx <= tol and dy <= tol and 0.5 * fw <= f.box.w <= 2.0 * fw:  # ähnliche Größe
                 prev = res.get(i)
                 if prev is None or math.hypot(dx, dy) < math.hypot(prev.box.cx - cx, prev.box.cy - cy):
                     res[i] = f
         return res
 
-    best = max((supporters(f.box.cx, f.box.cy) for _, f in small), key=len)
+    best = max((supporters(f.box.cx, f.box.cy, f.box.w) for _, f in small), key=len)
     # einmal um den Median nachzentrieren (stabiler als ein zufälliges Start-Gesicht)
-    refined = supporters(median(f.box.cx for f in best.values()), median(f.box.cy for f in best.values()))
+    refined = supporters(median(f.box.cx for f in best.values()), median(f.box.cy for f in best.values()),
+                         median(f.box.w for f in best.values()))
     return refined if len(refined) >= len(best) else best
 
 
@@ -231,11 +246,36 @@ def _snap(start: float, size: float, face_lo: float, face_hi: float) -> tuple[fl
     return start, max(0.0, end - start)
 
 
+def cam_style(members: list[FaceDet]) -> CamStyle:
+    """'cutout', wenn das Facecam-Gesicht zu groß für einen kleinen Webcam-Rahmen ist (freigestellter
+    Streamer über dem Gameplay), sonst 'frame'. Ohne Gesichter 'none'."""
+    if not members:
+        return "none"
+    return "cutout" if median(f.box.h for f in members) >= CUTOUT_MIN_FACE_H else "frame"
+
+
+def _cutout_box(fx: float, fy: float, fw: float, fh: float) -> Box:
+    """Kopf + Schultern eines freigestellten Streamers: ~2,6x Gesichtsbreite, ~2,2x Gesichtshöhe, wenig Platz
+    über dem Kopf, der Rest nach unten (Oberkörper); an Bildränder gezogen bzw. geklemmt."""
+    w = min(max(fw * CUTOUT_W_FACTOR, CAM_W_MIN), CUTOUT_W_MAX)
+    h = min(1.0, fh * CUTOUT_H_FACTOR)
+    x0, w = _snap(fx - w / 2, w, fx - fw / 2, fx + fw / 2)
+    y0 = max(0.0, fy - fh / 2 - fh * CUTOUT_HEADROOM)
+    if y0 < EDGE_SNAP:
+        y0 = 0.0
+    y1 = min(1.0, y0 + h)
+    if 1.0 - y1 < CUTOUT_BOTTOM_SNAP:  # Oberkörper geht bis zum unteren Rand weiter
+        y1 = 1.0
+    return Box(x=round(x0, 4), y=round(y0, 4), w=round(w, 4), h=round(y1 - y0, 4))
+
+
 def _facecam_box(members: list[FaceDet], info: MediaInfo) -> Box:
     fx = median(f.box.cx for f in members)
     fy = median(f.box.cy for f in members)
     fw = median(f.box.w for f in members)
     fh = median(f.box.h for f in members)
+    if cam_style(members) == "cutout":
+        return _cutout_box(fx, fy, fw, fh)
     cam_w = min(max(fw * CAM_W_FACTOR, CAM_W_MIN), CAM_W_MAX)
     cam_h = min(1.0, cam_w * (info.width / info.height) * 9.0 / 16.0)  # 16:9 in Pixeln
     x0, cam_w = _snap(fx - cam_w / 2, cam_w, fx - fw / 2, fx + fw / 2)
@@ -290,24 +330,44 @@ def _smooth_track(pts: list[tuple[float, float, float]]) -> list[TrackPoint]:
     return out
 
 
-def layout_from_detections(per_sample: list[tuple[float, list[FaceDet]]], info: MediaInfo) -> LayoutHint:
-    """Reine Layout-Entscheidung aus (Quellzeit, Gesichter)-Samples – Regeln siehe analyze_layout."""
+def _cam_points(per_sample: list[tuple[float, list[FaceDet]]], cam: dict[int, FaceDet]) -> list[tuple[float, float, float]]:
+    return sorted((per_sample[i][0], f.box.cx, f.box.cy) for i, f in cam.items())
+
+
+def layout_decision(per_sample: list[tuple[float, list[FaceDet]]], info: MediaInfo) -> tuple[LayoutHint, CamStyle]:
+    """Wie layout_from_detections, zusätzlich der Facecam-Stil ('frame' | 'cutout' | 'none') fürs Log.
+
+    track wird immer gefüllt, sobald stabile Gesichter da sind (der 'face'-Shot im Renderer nutzt ihn):
+    facecam_split -> Mitten des Facecam-Gesichts, face_track -> großes Gesicht, gameplay_fit -> großes
+    Gesicht bzw. Facecam-Gruppe in der Minderheit (mind. TRACK_MIN_POINTS Samples)."""
     if info.height >= info.width:
-        return LayoutHint(kind="vertical_native", confidence=1.0)
+        return LayoutHint(kind="vertical_native", confidence=1.0), "none"
     n = len(per_sample)
     if n == 0:
-        return LayoutHint(kind="gameplay_fit", confidence=0.0)
+        return LayoutHint(kind="gameplay_fit", confidence=0.0), "none"
 
     cam = _facecam_cluster(per_sample)
     track_pts = _large_face_points(per_sample)
     cam_share, track_share = len(cam) / n, len(track_pts) / n
+    style = cam_style(list(cam.values()))
 
     if cam_share >= FACECAM_MIN_SHARE and not (track_share >= TRACK_MIN_SHARE and track_share > cam_share):
-        return LayoutHint(kind="facecam_split", facecam_box=_facecam_box(list(cam.values()), info),
-                          gameplay_box=_gameplay_box(), confidence=round(cam_share, 3))
+        members = list(cam.values())
+        return LayoutHint(kind="facecam_split", facecam_box=_facecam_box(members, info),
+                          gameplay_box=_gameplay_box(), track=_smooth_track(_cam_points(per_sample, cam)),
+                          confidence=round(cam_share, 3)), style
     if track_share >= TRACK_MIN_SHARE:
-        return LayoutHint(kind="face_track", track=_smooth_track(track_pts), confidence=round(track_share, 3))
-    return LayoutHint(kind="gameplay_fit", confidence=round(1.0 - max(cam_share, track_share), 3))
+        return LayoutHint(kind="face_track", track=_smooth_track(track_pts),
+                          confidence=round(track_share, 3)), "none"
+    pts = track_pts if len(track_pts) >= TRACK_MIN_POINTS else _cam_points(per_sample, cam)
+    track = _smooth_track(pts) if len(pts) >= TRACK_MIN_POINTS else []
+    return LayoutHint(kind="gameplay_fit", track=track,
+                      confidence=round(1.0 - max(cam_share, track_share), 3)), "none"
+
+
+def layout_from_detections(per_sample: list[tuple[float, list[FaceDet]]], info: MediaInfo) -> LayoutHint:
+    """Reine Layout-Entscheidung aus (Quellzeit, Gesichter)-Samples – Regeln siehe analyze_layout."""
+    return layout_decision(per_sample, info)[0]
 
 
 def analyze_layout(path: str | Path, info: MediaInfo, detector: FaceDetector, samples: int = 16) -> LayoutHint:
@@ -315,9 +375,12 @@ def analyze_layout(path: str | Path, info: MediaInfo, detector: FaceDetector, sa
     - Höhe >= Breite -> vertical_native
     - kleines Gesicht (Breite < ~22 % des Bildes) stabil an ähnlicher Position in >=40 % der Samples
       -> facecam_split; facecam_box = geschätzter Webcam-Rahmen um das Gesicht (Seitenverhältnis ~16:9
-      oder 4:3, an Bildrand geklemmt); gameplay_box = Bildbereich ohne Facecam-Ecke (mittig, 16:9)
+      oder 4:3, an Bildrand geklemmt); gameplay_box = Bildbereich ohne Facecam-Ecke (mittig, 16:9).
+      Freigestellte Streamer ohne Rahmen ("cutout", Gesicht >= 18 % der Bildhöhe): Box um Kopf + Schultern
+      (~2,6x Gesichtsbreite, ~2,2x Gesichtshöhe, nach unten verlängert, an Ränder gezogen)
     - großes Gesicht in den meisten Samples -> face_track (track = geglättete Gesichtsmitten)
     - sonst gameplay_fit
+    track enthält immer die geglätteten Gesichtsmitten, sobald stabile Gesichter gefunden wurden.
     """
     if info.height >= info.width:
         return LayoutHint(kind="vertical_native", confidence=1.0)
@@ -328,8 +391,9 @@ def analyze_layout(path: str | Path, info: MediaInfo, detector: FaceDetector, sa
         per_sample.append((round(t, 3), detector.detect(frame)))
     if len(per_sample) < max(1, samples // 2):
         log.warning("Layout analysis: only %d/%d frames readable in %s", len(per_sample), samples, Path(path).name)
-    hint = layout_from_detections(per_sample, info)
-    log.debug("Layout %s (confidence %.2f, detector %s)", hint.kind, hint.confidence, detector_backend(detector))
+    hint, style = layout_decision(per_sample, info)
+    log.info("Layout %s (confidence %.2f, cam_style %s, %d track points, detector %s) for %s", hint.kind,
+             hint.confidence, style, len(hint.track), detector_backend(detector), Path(path).name)
     return hint
 
 
