@@ -177,6 +177,50 @@ class Emphasis(BaseModel):
     t: float  # Quellzeit (typisch: Start eines Wortes)
     emoji: str | None = None  # genau EIN Emoji-Zeichen, z. B. "💀"
     sfx: SfxName | None = None
+    shake: bool = False  # kurzes Kamerawackeln (v2)
+    flash: bool = False  # kurzer Weißblitz (v2)
+
+
+# --------------------------------------------------------------------------- Edit-Engine v2
+
+ShotKind = Literal["face", "split", "gameplay", "fit"]
+ColorName = Literal["white", "pink", "orange", "yellow", "green", "blue", "purple", "red"]
+TransitionKind = Literal["cut", "flash", "punch", "glitch"]
+
+
+class Shot(BaseModel):
+    """Ein Abschnitt mit eigener Bildaufteilung. Shots wechseln typisch alle 1–3 s.
+
+    - face:     Gesicht/Kamera bildfüllend (9:16-Ausschnitt um facecam_box bzw. Gesicht)
+    - split:    Kamera oben, Gameplay unten
+    - gameplay: Gameplay bildfüllend (9:16-Ausschnitt, zentriert auf focus bzw. gameplay_box)
+    - fit:      ganzes 16:9-Bild, unscharfer Hintergrund
+    """
+
+    start: float  # Quellzeit
+    end: float
+    kind: ShotKind
+    focus: Box | None = None  # optionaler Bildbereich (normalisiert, Quelle), auf den der Ausschnitt zielt
+    zoom: float = 1.0  # zusätzlicher Zoom innerhalb des Shots (1.0–1.6)
+    transition: TransitionKind = "cut"  # Übergang AM ANFANG dieses Shots
+
+
+class Annotation(BaseModel):
+    """Animierte Markierung im Bild (Kreis/Rahmen/Pfeil) um ein wichtiges Detail."""
+
+    start: float  # Quellzeit
+    end: float
+    kind: Literal["circle", "box", "arrow"] = "circle"
+    box: Box  # normalisiert, Quellbild
+    color: ColorName = "red"
+    label: str | None = None  # optional kurzer Text daneben (max 3 Wörter)
+
+
+class WordColor(BaseModel):
+    """Bedeutungsfarbe für ein Wort in den Captions (z. B. PLAYSTATION blau, XBOX grün)."""
+
+    word: str
+    color: ColorName
 
 
 class PlatformText(BaseModel):
@@ -206,6 +250,14 @@ class EditPlan(BaseModel):
     titles: PlatformText  # YouTube ≤ 100 Zeichen, TikTok/IG kurz
     descriptions: PlatformText  # Caption/Beschreibung inkl. Hashtags (Credit hängt der Code an)
     hashtags: list[str] = Field(default_factory=list)  # ohne "#"
+    # --- Edit-Engine v2 (alle optional; leer = Verhalten wie v1)
+    shots: list[Shot] = Field(default_factory=list)  # leer = ein Layout für den ganzen Clip
+    annotations: list[Annotation] = Field(default_factory=list)
+    word_colors: list[WordColor] = Field(default_factory=list)
+    hook_style: Literal["banner", "none"] = "banner"  # none = Hook wird gesprochen, kein Balken
+    outro_text: str | None = None  # Frage/CTA am Ende ("IS PS5 BETTER THAN XBOX?") für Kommentare
+    debate_score: int = 0  # 0–100: wie sehr lädt der Clip zum Kommentieren/Streiten ein
+    tags: list[str] = Field(default_factory=list)  # YouTube-Tags (Keywords, ohne #)
 
 
 class MomentPick(BaseModel):

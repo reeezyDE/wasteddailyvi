@@ -143,6 +143,8 @@ class FilterConfig(BaseModel):
     min_source_duration_s: float = 5.0
     max_source_duration_s: float = 180.0  # für Clips/Posts (nicht für lange YT-Videos)
     max_output_duration_s: float = 59.0  # <60 s: Shorts >1 min mit Content-ID-Claim werden global blockiert
+    target_output_min_s: float = 12.0  # Ziel-Länge (Retention): 12–25 s; nur Hinweis an Claude
+    target_output_max_s: float = 25.0
     min_output_duration_s: float = 7.0
     languages: list[str] = ["en"]  # Whisper-erkannte Sprache; leer = alle
     min_virality_score: int = 70  # 0–100, von Claude
@@ -183,6 +185,14 @@ class RenderConfig(BaseModel):
     music_bed: bool = False  # eigene lizenzfreie Tracks in assets/music
     music_gain_db: float = -24.0
     split_facecam_ratio: float = 0.40  # Anteil der Höhe für die Facecam im Split-Layout
+    # --- Edit-Engine v2
+    color_grade: bool = True  # kräftigere, wärmere Farben (Shorts-Look)
+    grade_saturation: float = 1.15
+    grade_contrast: float = 1.06
+    grade_warmth: float = 0.03  # >0 = wärmer
+    caption_glow: bool = True  # weicher Farb-Glow hinter den Captions
+    outro_seconds: float = 2.2  # so lange steht die Schlussfrage (outro_text) im Bild
+    transition_ms: int = 160  # Dauer von flash/punch/glitch-Übergängen
 
 
 class PlatformSlots(BaseModel):
