@@ -4,6 +4,12 @@ Selbst gehostete Pipeline für einen Clip-Kanal (Fan-Kanal „Wasted Daily | GTA
 virale Clips finden → Claude plant den Schnitt → Renderer macht 9:16-Shorts im Submagic-/Clip-Kanal-Stil →
 Review-Dashboard → Posten auf YouTube Shorts / TikTok / Instagram. Läuft 24/7 lokal oder auf einem VPS.
 Der Nutzer ist kein Entwickler: antworte auf **Deutsch**, kurz, mit konkreten Befehlen für Windows-PowerShell.
+Claude läuft beim Nutzer über das **Abo** (nicht API): `llm.backend: cli`, Nutzungslimits schonen.
+
+## ➡️ Nächste Aufgaben: `docs/ROADMAP.md`
+
+Dort stehen Strategie (EN- + DE-Kanal, Warm-up, später Kampagnen) und die **Bauschritte 1–7** mit Abnahmekriterien.
+Wenn der Nutzer „weiter“, „mach weiter“ o. ä. sagt: nächsten offenen Bauschritt aus der Roadmap umsetzen.
 
 ## Schnell orientieren (statt den Code zu durchsuchen)
 

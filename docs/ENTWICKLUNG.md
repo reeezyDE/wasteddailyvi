@@ -41,7 +41,10 @@ gleichmäßig verteilten Gesichtsspur), `split`, `gameplay` (optional focus), `f
 - **Clip-Länge** Ziel 12–25 s, hart < 60 s (Shorts > 1 min mit Content-ID-Claim werden blockiert).
 - **Musik im Quellclip** = größtes Copyright-Risiko → Standard: ablehnen.
 
-## Bekannte Grenzen / Ideen (Roadmap)
+## Bekannte Grenzen
+
+Geplante Bauschritte und Strategie: **`docs/ROADMAP.md`**.
+
 
 - Annotations/Face-Boxen sind statisch je Shot – Tracking bewegter Objekte fehlt.
 - Facecam-Erkennung bei freigestellten Streamern (ohne Rahmen) ist heuristisch; `--facecam x,y,w,h` überschreibt.
