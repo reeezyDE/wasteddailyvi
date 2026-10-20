@@ -267,7 +267,7 @@ def _sfx_events(plan: EditPlan, tm: TimeMap, zooms: list[compositor.ZoomOut]) ->
 def _caption_anchor(settings: Settings, layout_kind: str) -> tuple[int, int]:
     r = settings.config.render
     W, H = int(r.width), int(r.height)
-    ratio = r.split_facecam_ratio if layout_kind == "facecam_split" else r.captions.y_ratio
+    ratio = captions.caption_y_ratio(settings.config, layout_kind)
     return round(W * captions.CAPTION_X_RATIO), round(ratio * H)
 
 

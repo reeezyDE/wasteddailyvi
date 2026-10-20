@@ -51,6 +51,16 @@ _SLURS = frozenset(codecs.decode(w, "rot13") for w in _SLURS_ROT13)
 _LETTERS = re.compile(r"[^a-z]")
 
 
+def caption_y_ratio(cfg, layout: str) -> float:
+    """Vertikale Caption-Mitte (0..1): Split -> Naht, gameplay_fit -> unter dem Bild, sonst y_ratio."""
+    r = cfg.render
+    if layout == "facecam_split":
+        return r.split_facecam_ratio
+    if layout == "gameplay_fit":
+        return r.captions.y_ratio_fit
+    return r.captions.y_ratio
+
+
 def chunk_words(words: list[Word], max_words: int, max_chars: int, gap_s: float = 0.45) -> list[list[Word]]:
     """Wörter (zeitlich sortiert) zu Zeilen gruppieren: max max_words Wörter / max_chars Zeichen,
     neue Zeile nach Satzzeichen und bei Pausen > gap_s. Leere Wörter fallen weg."""
@@ -192,7 +202,7 @@ def build_ass(words: list[Word], timemap: TimeMap, highlight_words: list[str], l
 
     seam = layout == "facecam_split"
     x = round(W * CAPTION_X_RATIO)
-    y = round((r.split_facecam_ratio if seam else cap.y_ratio) * H)
+    y = round(caption_y_ratio(cfg, layout) * H)
     max_w = W * (MAX_W_RATIO_SEAM if seam else MAX_W_RATIO)
 
     # 1) Wörter in Ausgabezeit (teilweise geschnittene werden geklemmt)

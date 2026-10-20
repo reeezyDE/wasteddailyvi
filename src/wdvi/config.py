@@ -162,6 +162,7 @@ class CaptionStyle(BaseModel):
     outline: int = 7
     shadow: int = 3
     y_ratio: float = 0.66  # vertikale Position (0=oben, 1=unten) der Caption-Mitte; Shorts-UI beachten
+    y_ratio_fit: float = 0.75  # gameplay_fit: Captions in den freien Bereich unter dem Bild statt auf dessen Rand
     pop_ms: int = 90  # Pop-in-Animation des aktiven Wortes
     active_scale: int = 112  # % Skalierung des aktiven Wortes
 

@@ -143,6 +143,7 @@ render:
     outline: 7                            # Randstärke der Captions
     shadow: 3
     y_ratio: 0.66                         # vertikale Position (0 = oben, 1 = unten); Platz für die App-Buttons lassen
+    y_ratio_fit: 0.75                     # beim Layout „Gameplay groß + unscharfer Hintergrund“: unter dem Bild
     pop_ms: 90                            # Pop-Animation des aktiven Wortes (Millisekunden)
     active_scale: 112                     # aktives Wort wird auf 112 % vergrößert
   sfx: true                               # Soundeffekte (whoosh bei Zooms, boom/pop an Highlights)
