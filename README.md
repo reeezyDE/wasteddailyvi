@@ -15,14 +15,16 @@ Läuft 24/7 in Docker auf deinem Windows- oder Linux-PC mit NVIDIA-Grafikkarte.
 
 1. [Was es kann](#was-es-kann)
 2. [So funktioniert es](#so-funktioniert-es)
-3. [Voraussetzungen](#voraussetzungen)
-4. [Schnellstart Windows](#schnellstart-windows)
-5. [Schnellstart Linux](#schnellstart-linux)
-6. [Erster Start (beide Systeme)](#erster-start-beide-systeme)
-7. [Kosten](#kosten)
-8. [Spielregeln – bitte lesen!](#spielregeln--bitte-lesen)
-9. [Fehlerbehebung](#fehlerbehebung)
-10. [Für Entwickler](#für-entwickler)
+3. [Edit-Engine v2](#edit-engine-v2)
+4. [Beste Quellqualität](#beste-quellqualität)
+5. [Voraussetzungen](#voraussetzungen)
+6. [Schnellstart Windows](#schnellstart-windows)
+7. [Schnellstart Linux](#schnellstart-linux)
+8. [Erster Start (beide Systeme)](#erster-start-beide-systeme)
+9. [Kosten](#kosten)
+10. [Spielregeln – bitte lesen!](#spielregeln--bitte-lesen)
+11. [Fehlerbehebung](#fehlerbehebung)
+12. [Für Entwickler](#für-entwickler)
 
 Ausführliche Anleitungen:
 
@@ -68,8 +70,9 @@ Nicht enthalten (für Gameplay-Clips nicht nötig): KI-Stimmen, B-Roll aus Stock
                                         ▼
                  ┌──────────────────────────────────────────────┐
                  │  3. CLAUDE  „Ist das viral?“ Score 0–100,    │
-                 │     Schnitt, Zooms, Emojis, Hook, Titel,     │
-                 │     Hashtags je Plattform – oder Ablehnung   │
+                 │     Schnitt, Shots, Zooms, Farben, Hook,     │
+                 │     Schlussfrage, Titel, Hashtags, Tags      │
+                 │     je Plattform – oder Ablehnung            │
                  └──────────────────────┬───────────────────────┘
                                         ▼
                  ┌──────────────────────────────────────────────┐
@@ -88,6 +91,76 @@ Nicht enthalten (für Gameplay-Clips nicht nötig): KI-Stimmen, B-Roll aus Stock
 
    Alles in EINEM Docker-Container · Daten in ./data (SQLite-Datenbank, Videos, Tokens)
 ```
+
+## Edit-Engine v2
+
+Vorbild sind die großen Clip-Kanäle: ein 16-Sekunden-Short mit IShowSpeed zu GTA 6 hatte in vier Tagen
+866.000 Aufrufe. Was ihn ausmacht – und was Claude jetzt für jeden Clip plant:
+
+| Element | So sieht es aus | Im Plan (`EditPlan`) |
+|---|---|---|
+| **Gesprochener Hook** | Das erste Bild ist das Gesicht des Streamers bildfüllend, seine Frage/Behauptung *ist* der Hook – kein Textbalken. Nur wenn der Anfang ohne Text nicht verständlich ist (stilles Gameplay, Nuscheln, andere Sprache), kommt der klassische Hook-Balken oben. | `hook_style`: `none` oder `banner`, dazu `hook_text` |
+| **Shots** | Die Ansicht wechselt alle 1–3 s: Gesicht groß (`face`), Kamera oben + Gameplay unten (`split`), Gameplay-Ausschnitt groß (`gameplay`), ganzes Bild auf unscharfem Hintergrund (`fit`). Jeder Shot kann auf einen Bildbereich zielen und leicht zoomen. | `shots` mit `kind`, `focus`, `zoom` |
+| **Übergänge** | Harte Schnitte, ein Weißblitz bei großen Momenten, Zoom-„Punch“ auf Pointen, selten ein Glitch. | `transition`: `cut`, `flash`, `punch`, `glitch` |
+| **Markierungen** | Ein animierter Kreis (rot → gelb), Rahmen oder Pfeil um das Detail, auf das es ankommt (z. B. „Plays best on PS5“). | `annotations` (Position in Quellbild-Koordinaten) |
+| **Bedeutungsfarben** | Captions mit 2–4 Wörtern, Schlüsselwörter in ihrer echten Farbe: PLAYSTATION blau, XBOX grün, GTA 6 pink, Geld grün, Polizei/Tod rot – mit weichem Glow. | `word_colors`, `highlight_words` |
+| **Akzente** | Kurzes Kamerawackeln oder Blitz auf Einschlägen, Emojis, Soundeffekte. | `emphasis` (`shake`, `flash`, `emoji`, `sfx`) |
+| **Schlussfrage** | Am Ende eine Karte mit einer Frage für die Kommentare („IS PLAYSTATION BETTER THAN XBOX?“), die zurück an den Anfang führt – das Video loopt nahtlos. | `outro_text`, `debate_score` (0–100: wie sehr der Clip zum Diskutieren einlädt) |
+| **Farblook** | Wärmer, satter, etwas mehr Kontrast – der typische Shorts-Look. | `render.color_grade` (config.yaml) |
+| **Verpackung** | Titel als kurze Frage mit Emojis; YouTube-Beschreibung mit Credit, Fan-Hinweis, **komplettem Transkript** des gesprochenen Textes (wird von der Suche gelesen) und 3–5 Hashtags; dazu YouTube-Tags (Keywords). TikTok/Instagram bleiben kurz: Titel, 3–5 Hashtags, Credit. | `titles`, `descriptions`, `hashtags`, `tags` |
+
+Alle Zeiten im Plan sind Sekunden der heruntergeladenen Quelle; der Renderer rechnet sie auf das fertige
+Video um. Lässt Claude die neuen Felder leer (z. B. bei einer Hochkant-Quelle), entsteht das Video genau wie
+vorher mit einem Layout für den ganzen Clip.
+
+**#GTA6 nur bei GTA-Inhalten:** Der Hashtag `#GTA6` (und der YouTube-Tag `GTA6`) wird nur noch angehängt,
+wenn Titel, Hashtags oder Tags des Plans GTA erwähnen – Clips über etwas anderes bekommen keinen
+irreführenden Hashtag mehr.
+
+### Feinjustieren (config.yaml)
+
+| Einstellung | Standard | Wirkung |
+|---|---|---|
+| `filters.target_output_min_s` / `target_output_max_s` | 12 / 25 | Wunschlänge, die Claude anpeilt (harte Grenzen bleiben `min_output_duration_s`/`max_output_duration_s`) |
+| `render.color_grade` | `true` | Farblook an/aus |
+| `render.grade_saturation` | 1.15 | Sättigung; über 1.3 werden Hauttöne schnell orange |
+| `render.grade_contrast` | 1.06 | Kontrast |
+| `render.grade_warmth` | 0.03 | > 0 wärmer, < 0 kühler |
+| `render.caption_glow` | `true` | Leuchtschein hinter den Captions |
+| `render.outro_seconds` | 2.2 | wie lange die Schlussfrage im Bild steht |
+| `render.transition_ms` | 160 | Dauer von Blitz/Punch/Glitch |
+| `render.captions.y_ratio` | 0.66 | Höhe der Captions (bei Clips mit mehreren Shots immer diese Höhe) |
+
+Tipps: Wirkt ein Video zu hektisch, `transition_ms` auf 100–120 senken; sehen Gesichter zu rot aus,
+`grade_warmth: 0` und `grade_saturation: 1.08`. Was Claude plant (Shots, Farben, Schlussfrage), siehst du im
+Dashboard in Claudes Begründung und im Video selbst – passt ein Text nicht, vor der Freigabe ändern.
+Mehr zum Alltag: [docs/BETRIEB.md → Edit-Engine v2 im Alltag](docs/BETRIEB.md#edit-engine-v2-im-alltag).
+
+## Beste Quellqualität
+
+Das fertige Short hat 1080×1920 Pixel. Bei Gesichts- und Gameplay-Shots wird ein Ausschnitt der Quelle
+stark vergrößert – eine **360p-Quelle sieht danach weich und verwaschen aus**, egal wie gut der Schnitt
+ist. Mindestens 720p, besser 1080p.
+
+WastedDailyVI lädt deshalb automatisch die beste Auflösung bis 1080p (yt-dlp mit `-S "res:1080"`) und
+schreibt eine Warnung ins Log, wenn die Quelle unter 720p liegt („Quelle nur 360p – Ergebnis wird
+unscharf“). So prüfst du einen Link selbst:
+
+```bash
+# 1. Welche Formate gibt es? (Spalte RESOLUTION – steht dort höchstens 640x360, ist die Quelle schwach)
+docker compose exec wdvi yt-dlp -F "<Link>"
+
+# 2. Lokal in bester Qualität bis 1080p laden, z. B. zum Ansehen oder Vergleichen
+docker compose exec wdvi yt-dlp -S "res:1080" -o "data/quelle-test.%(ext)s" "<Link>"
+```
+
+(Ohne Docker geht dasselbe mit einem lokal installierten `yt-dlp`: `pip install -U "yt-dlp[default]"`.)
+
+Gibt es nur 360p, lohnt sich fast immer die Suche nach einer besseren Quelle: der Original-Twitch-Clip
+oder das YouTube-Video des Streamers statt eines Reddit-Reposts oder Re-Uploads. Den besseren Link dann
+direkt verarbeiten: `docker compose exec wdvi wdvi process-url "<Link>"`. Meldet YouTube „Sign in to
+confirm you're not a bot“ oder liefert nur niedrige Auflösungen, hilft eine Cookies-Datei
+(`WDVI_YTDLP_COOKIES_FILE`, siehe `.env.example`).
 
 ## Voraussetzungen
 

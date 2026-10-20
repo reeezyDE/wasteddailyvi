@@ -31,7 +31,7 @@ from wdvi.media import probe as media_probe
 from wdvi.media.transcribe import TranscribeError
 from wdvi.models import Candidate, Clip, CreatorRule, JobRun, Metric, Post
 from wdvi.publish import slots, text
-from wdvi.render import renderer
+from wdvi.render import renderer, timeline
 from wdvi.schemas import (
     CandidateIn,
     EditPlan,
@@ -251,6 +251,17 @@ def _utc(dt: datetime | None) -> datetime | None:
 def _short(msg: object, limit: int = 300) -> str:
     s = " ".join(str(msg).split())
     return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _post_hashtags(platform: str, plan: dict | None) -> list[str]:
+    """PostRequest.hashtags: YouTube bekommt Plan-Tags (Keywords) + Hashtags für snippet.tags,
+    TikTok/Instagram nur die Hashtags (die stehen ohnehin schon in der Caption)."""
+    pl = plan if isinstance(plan, dict) else {}
+    hashtags = [str(h) for h in (pl.get("hashtags") or [])]
+    if platform != "youtube":
+        return hashtags
+    tags = [str(t) for t in (pl.get("tags") or [])]
+    return [*tags, *hashtags]
 
 
 def safe_name(key: str) -> str:
@@ -1492,6 +1503,23 @@ class Pipeline:
             "transcript": _short(tr.text, 1500) if tr is not None and tr.text else "",
         }
 
+    def _kept_transcript(self, analysis: MediaAnalysis, plan: EditPlan) -> str:
+        """Gesprochene Wörter innerhalb der behaltenen Abschnitte (gleiche Schnittliste wie der Renderer),
+        bereinigt und auf ~600 Zeichen gekürzt. Fehler -> "" (Beschreibung kommt dann ohne Transkript aus)."""
+        tr = analysis.transcript
+        if tr is None:
+            return ""
+        try:
+            words = tr.words()
+            if not words:  # Segmente ohne Wortzeiten: Segmente als "Wörter" nehmen
+                words = [w for w in tr.segments if (w.text or "").strip()]
+            tm = timeline.build_timemap(plan, analysis.info.duration)
+            tm = timeline.cap_duration(tm, self.settings.config.filters.max_output_duration_s)
+            return text.transcript_text(words, tm if tm.segments else None)
+        except Exception as e:  # noqa: BLE001 - Transkript ist nur Zugabe
+            log.warning("transcript for description failed: %s", e)
+            return ""
+
     def process_candidate(self, candidate_id: int) -> int | None:
         """download -> Längen-Check -> analyze -> Sprach-/Musik-/Dedup-Filter -> plan_clip -> render_clip -> Clip
         (pending_review; bei require_approval=False direkt approved). Gibt Clip-ID oder None zurück.
@@ -1602,11 +1630,22 @@ class Pipeline:
         platforms = self.enabled_platforms()
         titles: dict[str, str] = {}
         descriptions: dict[str, str] = {}
+        spoken = self._kept_transcript(analysis, plan)
+        all_titles = " ".join(getattr(plan.titles, p, "") or "" for p in PLATFORMS)  # für die GTA-Erkennung
         for p in PLATFORMS:
             title = getattr(plan.titles, p, "") or plan.titles.youtube
             body = getattr(plan.descriptions, p, "") or ""
             titles[p] = text.compose_title(p, title)
-            descriptions[p] = text.compose_description(p, body, list(plan.hashtags), c, self.settings)
+            descriptions[p] = text.compose_description(
+                p,
+                body,
+                list(plan.hashtags),
+                c,
+                self.settings,
+                transcript=spoken,  # nur YouTube nutzt es (TikTok/Instagram bleiben kurz)
+                title=all_titles,
+                tags=list(plan.tags),
+            )
         auto = not self.settings.config.publish.require_approval
         note = None
         f = self.settings.config.filters
@@ -1620,7 +1659,11 @@ class Pipeline:
             status="approved" if auto else "pending_review",
             virality_score=int(plan.virality_score),
             plan=plan.model_dump(mode="json"),
-            analysis=self._analysis_summary(analysis),
+            analysis={
+                **self._analysis_summary(analysis),
+                "transcript_kept": spoken,  # gesprochener Text im fertigen Clip (YouTube-Beschreibung)
+                "debate_score": int(plan.debate_score),
+            },
             video_path=str(res.video_path),
             thumb_path=str(res.thumb_path) if res.thumb_path else None,
             duration=float(res.duration),
@@ -1715,10 +1758,20 @@ class Pipeline:
     # ------------------------------------------------------------------ review (vom Dashboard aufgerufen)
 
     def _edited_description(
-        self, platform: str, edited: str, current: str | None, hashtags: list[str], c: CandidateIn | None
+        self,
+        platform: str,
+        edited: str,
+        current: str | None,
+        hashtags: list[str],
+        c: CandidateIn | None,
+        *,
+        plan: dict | None = None,
+        transcript: str | None = None,
     ) -> str:
-        """Im Dashboard bearbeitete Beschreibung: Credit, Fan-Hinweis und #GTA6 hängt immer der Code an.
-        Unveränderte Texte bleiben exakt so; sonst wird der Text (ohne alten Anhang) neu zusammengesetzt."""
+        """Im Dashboard bearbeitete Beschreibung: Credit, Fan-Hinweis, Transkript (YouTube) und Hashtags
+        (#GTA6 bei GTA-Inhalten) hängt immer der Code an. Unveränderte Texte bleiben exakt so; sonst wird der
+        Text (ohne alten Anhang) neu zusammengesetzt. Steht im Anhang noch ein "Transcript:"-Block, gilt dessen
+        (evtl. korrigierter) Text; wurde nur der Transkript-Block gelöscht, bleibt er weg."""
         d = (edited or "").replace("\r\n", "\n").strip()  # Browser-Formulare schicken CRLF
         if current is not None and d == current.strip():
             return current
@@ -1732,15 +1785,26 @@ class Pipeline:
         markers = [m for m in (credit, text.FAN_DISCLAIMER, "🎥 Clip:") if m]
         cuts = [d.find(m) for m in markers if m in d]
         body, tail_tags = d, None
+        spoken = transcript
         if cuts:
             cut = min(cuts)
             body, tail = d[:cut].rstrip(), d[cut:]
             tail_tags = text.hashtags_in(tail)
+            spoken = text.transcript_in(tail)
         if c is None:  # ohne Kandidat kein Credit möglich – Text so übernehmen
             return d
+        pl = plan or {}
+        titles = pl.get("titles") if isinstance(pl.get("titles"), dict) else {}
         try:
             return text.compose_description(
-                platform, body, tail_tags if tail_tags else hashtags, c, self.settings
+                platform,
+                body,
+                tail_tags if tail_tags else hashtags,
+                c,
+                self.settings,
+                transcript=spoken,
+                title=" ".join(str(t) for t in titles.values() if t),
+                tags=[str(t) for t in (pl.get("tags") or [])],
             )
         except Exception as e:  # Absicherung: wenigstens den Credit anhängen
             log.warning("compose_description failed for %s: %s", platform, e)
@@ -1776,10 +1840,14 @@ class Pipeline:
                 if p in PLATFORMS and t is not None and t.strip():
                     new_titles[p] = text.compose_title(p, t)
             new_desc = dict(clip.descriptions or {})
-            hashtags = list((clip.plan or {}).get("hashtags") or [])
+            plan = clip.plan if isinstance(clip.plan, dict) else {}
+            hashtags = list(plan.get("hashtags") or [])
+            spoken = str((clip.analysis or {}).get("transcript_kept") or "") or None
             for p, d in (descriptions or {}).items():
                 if p in PLATFORMS and d is not None:
-                    new_desc[p] = self._edited_description(p, d, new_desc.get(p), hashtags, cin)
+                    new_desc[p] = self._edited_description(
+                        p, d, new_desc.get(p), hashtags, cin, plan=plan, transcript=spoken
+                    )
             clip.titles = new_titles
             clip.descriptions = new_desc
             clip.platforms = chosen
@@ -2342,7 +2410,7 @@ class Pipeline:
                 video_path=clip.video_path,
                 title=post.title,
                 description=post.description,
-                hashtags=list((clip.plan or {}).get("hashtags") or []),
+                hashtags=_post_hashtags(post.platform, clip.plan),
                 publish_at=_utc(post.scheduled_at) if early else None,
                 thumb_path=clip.thumb_path,
             )

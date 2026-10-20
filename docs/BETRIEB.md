@@ -177,6 +177,57 @@ Bis der Audit durch ist (Antrag: [SETUP.md → API-Audit](SETUP.md#45-wichtig-ap
 YouTube in `config.yaml` mit `publish.youtube.enabled: false` abschalten und die fertigen Videos aus
 `data/clips/` selbst im YouTube Studio hochladen – oder die gesperrten Uploads in Kauf nehmen.
 
+## Edit-Engine v2 im Alltag
+
+Seit der Edit-Engine v2 plant Claude nicht nur Schnitt und Zooms, sondern das ganze Short wie ein
+Top-Clip-Kanal (Überblick: [README → Edit-Engine v2](../README.md#edit-engine-v2)):
+
+- **Shots:** Die Ansicht wechselt alle 1–3 s zwischen Gesicht groß, Kamera oben/Gameplay unten,
+  Gameplay-Ausschnitt und ganzem Bild – mit harten Schnitten, Blitz, Zoom-Punch oder (selten) Glitch.
+- **Hook:** Ist der erste gesprochene Satz stark, *ist* er der Hook (Gesicht bildfüllend, kein Balken).
+  Nur sonst steht oben der Hook-Text.
+- **Markierungen:** animierter Kreis/Rahmen/Pfeil um das entscheidende Detail im Bild.
+- **Farben:** Schlüsselwörter in den Captions in ihrer Bedeutungsfarbe (PlayStation blau, Xbox grün,
+  GTA 6 pink, Geld grün, Polizei rot) mit Glow.
+- **Schlussfrage:** am Ende eine Frage für die Kommentare; das Video loopt in den Anfang zurück. Wie sehr
+  ein Clip zum Diskutieren einlädt, schätzt Claude als `debate_score` (0–100, steht im Plan des Clips).
+- **Texte:** Die YouTube-Beschreibung enthält nach Credit und Fan-Hinweis einen Block **„Transcript:“** mit
+  dem gesprochenen Text des fertigen Clips (nur die behaltenen Stellen, max. ~600 Zeichen) – YouTube liest
+  ihn für die Suche. Danach 3–5 Hashtags. Die YouTube-Tags (Keywords) kommen aus dem Plan. TikTok und
+  Instagram bleiben kurz (Titel, Beschreibung, Credit, 3–5 Hashtags). `#GTA6` steht nur noch bei Clips, deren
+  Titel/Hashtags/Tags GTA erwähnen.
+
+**Beim Review beachten:**
+
+1. Ansehen, ob die Schlussfrage passt und nicht beleidigend wirkt. Passt sie nicht: Clip ablehnen bzw.
+   mit `wdvi process-url <Link> --force` neu rendern lassen (Claude plant dann neu).
+2. Das Transkript in der YouTube-Beschreibung stammt von Whisper. Falsch erkannte Wörter (vor allem
+   Namen) kannst du vor der Freigabe direkt im Textfeld korrigieren – der korrigierte Text bleibt erhalten.
+   Löschst du nur den Transkript-Block, bleibt er weg; löschst du den ganzen Anhang, hängt WastedDailyVI
+   Credit, Fan-Hinweis, Transkript und Hashtags neu an.
+3. Wirkt ein Video zu hektisch oder zu bunt, in der `config.yaml` unter `render` nachregeln
+   (`transition_ms`, `grade_saturation`, `grade_warmth`, `color_grade: false`, `caption_glow: false`), dann
+   `docker compose restart`. Die Wunschlänge steuern `filters.target_output_min_s`/`target_output_max_s`
+   (Standard 12–25 s).
+
+## Beste Quellqualität
+
+Shots vergrößern Ausschnitte der Quelle stark – **360p-Quellen sehen im fertigen 1080×1920-Video weich und
+verwaschen aus**. WastedDailyVI lädt automatisch die beste Auflösung bis 1080p (yt-dlp `-S "res:1080"`) und
+warnt im Log: „Quelle nur 360p – Ergebnis wird unscharf“.
+
+Einen Link selbst prüfen und lokal laden:
+
+```bash
+docker compose exec wdvi yt-dlp -F "<Link>"                                  # Formate auflisten (Spalte RESOLUTION)
+docker compose exec wdvi yt-dlp -S "res:1080" -o "data/quelle-test.%(ext)s" "<Link>"   # beste Qualität bis 1080p
+```
+
+Steht bei `-F` höchstens `640x360`, eine bessere Quelle suchen (Original-Clip auf Twitch oder das
+YouTube-Video des Streamers statt Reddit-Repost/Re-Upload) und diese mit
+`docker compose exec wdvi wdvi process-url "<Link>"` verarbeiten. Liefert YouTube nur niedrige Auflösungen
+oder fragt nach „not a bot“: Cookies-Datei eintragen (`WDVI_YTDLP_COOKIES_FILE` in `.env`).
+
 ## Takedowns und Opt-outs
 
 Früher oder später schreibt ein Creator: „Bitte keine Clips von mir.“ Oder eine Plattform meldet eine

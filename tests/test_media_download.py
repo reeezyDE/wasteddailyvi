@@ -69,7 +69,8 @@ def test_download_twitch_clip(candidate: CandidateIn, tmp_path: Path, settings):
     ydl = FakeYDL.instances[0]
     assert ydl.urls == [candidate.url]
     o = ydl.opts
-    assert o["format"] == "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b"
+    assert o["format"] == "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
+    assert o["format_sort"] == ["res:1080", "vcodec:h264", "acodec:aac"]
     assert o["merge_output_format"] == "mp4"
     assert o["outtmpl"].endswith("twitch_clip_AwkwardHelplessSalamanderSwiftRage.%(ext)s")
     assert o["quiet"] and o["noprogress"]

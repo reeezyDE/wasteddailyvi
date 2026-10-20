@@ -121,7 +121,8 @@ def test_plan_clip_builds_prompt_and_sanitizes(settings, candidate, sample_trans
     assert "Frame t=1.00s (faces: 1)" in labels
     assert not any("t=4.00" in t for t in labels)
     imgs = [b for b in blocks if b["type"] == "image"]
-    assert imgs == [{"type": "image", "path": str(jpg.resolve()), "t": 1.0}]
+    # v2: Claude bekommt eine Kopie mit Koordinatengitter (Original bleibt unverändert)
+    assert imgs == [{"type": "image", "path": str((tmp_path / "_grid" / "f1.jpg").resolve()), "t": 1.0}]
     i = blocks.index(imgs[0])
     assert blocks[i - 1]["text"] == "Frame t=1.00s (faces: 1)"
     assert blocks[-1]["text"] == prompts.EDITOR_TASK

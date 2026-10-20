@@ -189,7 +189,7 @@ def test_severe_slurs_are_masked_in_burned_in_captions(settings, tmp_path):
     evs = _events(captions.build_ass(words, TimeMap(segments=[(0.0, 10.0)]), [], "gameplay_fit", settings,
                                      tmp_path / "c.ass"))
     shown = [_plain(t) for _, _, t in evs]
-    assert shown == ["BRO", "N****", "NO", "WAY", "F******", "FUCKING", "SHIT"]  # normale Flüche bleiben
+    assert shown == ["BRO", "N****", "NO", "WAY", "F******", "F*CKING", "SH*T"]  # Flüche entschärft (caption_censor)
     raw = (tmp_path / "c.ass").read_text(encoding="utf-8").lower()
     assert _slur("avttn") not in raw and _slur("snttbg") not in raw
 

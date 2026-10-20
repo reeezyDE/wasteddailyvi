@@ -22,7 +22,11 @@ from wdvi.schemas import CandidateIn, SourceKind
 
 log = logging.getLogger(__name__)
 
-FORMAT = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b"
+# Beste Qualität bis 1080p: format_sort wählt die höchste Auflösung <= 1080p, bei Gleichstand H.264/AAC
+# (direkt MP4-tauglich). Kein [ext=mp4]-Zwang mehr – der hatte oft das 360p-Kombiformat statt 1080p geholt.
+FORMAT = "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
+FORMAT_SORT = ["res:1080", "vcodec:h264", "acodec:aac"]
+MIN_GOOD_HEIGHT = 720  # darunter wird das 1080x1920-Ergebnis sichtbar unscharf
 MAX_FILESIZE = 1_500_000_000  # Schutz gegen versehentliche Komplett-Downloads langer Videos
 _PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
 DURATION_TOLERANCE_S = 2.0  # wie pipeline.LENGTH_TOLERANCE_S: Container-Rundung nicht als "zu lang" werten
@@ -225,6 +229,7 @@ def build_options(c: CandidateIn, dest_dir: Path, settings: Settings | None = No
     stem = safe_key(c.key)
     opts: dict = {
         "format": FORMAT,
+        "format_sort": list(FORMAT_SORT),
         "merge_output_format": "mp4",
         "outtmpl": str(dest_dir / f"{stem}.%(ext)s"),
         "quiet": True,
@@ -254,8 +259,51 @@ def build_options(c: CandidateIn, dest_dir: Path, settings: Settings | None = No
     return opts
 
 
+def _int(v: object) -> int | None:
+    try:
+        n = int(float(v))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def source_resolution(info: dict | None) -> tuple[int | None, int | None]:
+    """(Breite, Höhe) des geladenen Videos aus den yt-dlp-Infos (gemergte Formate: größte Videospur)."""
+    if not isinstance(info, dict):
+        return None, None
+    best: tuple[int | None, int | None] = (_int(info.get("width")), _int(info.get("height")))
+    for key in ("requested_formats", "requested_downloads"):
+        for f in info.get(key) or []:
+            if not isinstance(f, dict) or f.get("vcodec") == "none":
+                continue
+            w, h = _int(f.get("width")), _int(f.get("height"))
+            if h is not None and (best[1] is None or h > best[1]):
+                best = (w, h)
+    if best[1] is None:
+        m = re.search(r"(\d{3,4})p", str(info.get("format_note") or info.get("resolution") or ""))
+        if m:
+            best = (best[0], int(m.group(1)))
+        else:
+            m = re.search(r"(\d{3,4})x(\d{3,4})", str(info.get("resolution") or ""))
+            if m:
+                best = (int(m.group(1)), int(m.group(2)))
+    return best
+
+
+def quality_note(info: dict | None) -> str | None:
+    """Deutscher Hinweis, wenn die Quelle unter 720p liegt ("Quelle nur 360p – Ergebnis wird unscharf"),
+    sonst None (auch bei unbekannter Auflösung). Maßgeblich ist die kurze Kante (Hochkant-Quellen!)."""
+    w, h = source_resolution(info)
+    if h is None:
+        return None
+    p = min(w, h) if w is not None else h
+    if p >= MIN_GOOD_HEIGHT:
+        return None
+    return f"Quelle nur {p}p – Ergebnis wird unscharf"
+
+
 def download(c: CandidateIn, dest_dir: Path, settings: Settings) -> Path:
-    """Lädt den Kandidaten als MP4 (H.264/AAC bevorzugt, max 1080p) nach dest_dir/<sicherer-key>.mp4.
+    """Lädt den Kandidaten als MP4 (beste Qualität bis 1080p, H.264/AAC bevorzugt) nach dest_dir/<sicherer-key>.mp4.
 
     - youtube_moment: nur den Abschnitt [start_s, end_s] (yt-dlp download_ranges, force_keyframes_at_cuts)
     - andere Quellen: länger als filters.max_source_duration_s (laut Metadaten) -> TooLongError, ohne Download
@@ -294,5 +342,10 @@ def download(c: CandidateIn, dest_dir: Path, settings: Settings) -> Path:
     path = _find_output(info if isinstance(info, dict) else None, dest_dir, stem)
     if path is None:
         raise DownloadError(f"Download von {url} lieferte keine Datei (in {dest_dir}).")
-    log.info("Downloaded %s -> %s (%.1f MB)", c.key, path.name, path.stat().st_size / 1e6)
+    w, h = source_resolution(info if isinstance(info, dict) else None)
+    log.info("Downloaded %s -> %s (%.1f MB, %s)", c.key, path.name, path.stat().st_size / 1e6,
+             f"{w or '?'}x{h}" if h else "Auflösung unbekannt")
+    note = quality_note(info if isinstance(info, dict) else None)
+    if note:
+        log.warning("%s: %s", c.key, note)
     return path

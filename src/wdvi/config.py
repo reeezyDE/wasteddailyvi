@@ -191,6 +191,7 @@ class RenderConfig(BaseModel):
     grade_contrast: float = 1.06
     grade_warmth: float = 0.03  # >0 = wärmer
     caption_glow: bool = True  # weicher Farb-Glow hinter den Captions
+    caption_censor: bool = True  # Flüche in Captions entschärfen ("F*CKING") – TikTok/YouTube drosseln sonst
     outro_seconds: float = 2.2  # so lange steht die Schlussfrage (outro_text) im Bild
     transition_ms: int = 160  # Dauer von flash/punch/glitch-Übergängen
 

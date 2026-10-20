@@ -149,7 +149,7 @@ def test_publish_scheduled_with_publish_at(settings, video):
     sn = args["body"]["snippet"]
     assert sn["title"] == "He really did that 💀 #Shorts"
     assert sn["categoryId"] == "20"
-    assert sn["tags"] == ["GTA6", "gtavi", "gta6clips"]
+    assert sn["tags"] == ["GTA6", "gtavi", "gta 6 clips"]  # Keywords behalten Leerzeichen
     assert "<" not in sn["description"]
     media = args["media_body"]
     assert media.mimetype() == "video/mp4" and media.resumable() and media.chunksize() == 8 * 1024 * 1024

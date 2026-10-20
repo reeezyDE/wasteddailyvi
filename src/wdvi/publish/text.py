@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
+from typing import Protocol
 
 from wdvi.config import Settings
-from wdvi.schemas import CandidateIn, SourceKind
+from wdvi.schemas import CandidateIn, SourceKind, TimeMap
 
 FAN_DISCLAIMER = "Fan channel – not affiliated with Rockstar Games or Take-Two."
-REQUIRED_HASHTAG = "GTA6"
-MAX_HASHTAGS = 8
+REQUIRED_HASHTAG = "GTA6"  # nur noch bei GTA-Inhalten (siehe is_gta_content)
+MAX_HASHTAGS = 5  # Beschreibung/Caption: 3–5 Hashtags wirken besser als lange Hashtag-Blöcke
+MIN_HASHTAGS = 3  # zu wenige Plan-Hashtags -> mit Plan-Tags auffüllen
+TRANSCRIPT_LABEL = "Transcript:"
+TRANSCRIPT_MAX_CHARS = 600
 YOUTUBE_TITLE_MAX = 100
 SHORTS_SUFFIX = " #Shorts"
 SOCIAL_TITLE_MAX = 150  # TikTok/Instagram: Titel = erste Zeile der Caption, kurz halten
@@ -21,6 +25,9 @@ DESCRIPTION_LIMITS = {"youtube": 5000, "tiktok": 2200, "instagram": 2200}
 
 _HASHTAG_RE = re.compile(r"#(\w+)", re.UNICODE)
 _TAG_CLEAN_RE = re.compile(r"[^\w]", re.UNICODE)
+_GTA_RE = re.compile(r"gta|grand\s*theft\s*auto|vice\s*city|leonida", re.IGNORECASE)
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.!?;:…%)])")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 # --------------------------------------------------------------------------- Längenmaße
@@ -76,11 +83,11 @@ def clean_hashtag(raw: str) -> str:
     return tag
 
 
-def normalize_hashtags(tags: Iterable[str], limit: int = MAX_HASHTAGS) -> list[str]:
-    """Ohne '#', case-insensitiv dedupliziert, "GTA6" immer zuerst, max. limit Stück."""
+def normalize_hashtags(tags: Iterable[str], limit: int = MAX_HASHTAGS, *, gta: bool = True) -> list[str]:
+    """Ohne '#', case-insensitiv dedupliziert, max. limit Stück. gta=True: "GTA6" steht zuerst."""
     out: list[str] = []
     seen: set[str] = set()
-    for raw in [REQUIRED_HASHTAG, *tags]:
+    for raw in [REQUIRED_HASHTAG, *tags] if gta else list(tags):
         tag = clean_hashtag(str(raw))
         if not tag or tag.lower() in seen:
             continue
@@ -91,6 +98,36 @@ def normalize_hashtags(tags: Iterable[str], limit: int = MAX_HASHTAGS) -> list[s
 
 def hashtags_in(text: str) -> list[str]:
     return _HASHTAG_RE.findall(text)
+
+
+def _flatten(parts: Iterable[object]) -> Iterable[str]:
+    for p in parts:
+        if p is None:
+            continue
+        if isinstance(p, str):
+            yield p
+        elif isinstance(p, Iterable):
+            yield from _flatten(p)
+        else:
+            yield str(p)
+
+
+def is_gta_content(*parts: object) -> bool:
+    """True, wenn Titel/Hashtags/Tags/Text GTA erwähnen ("GTA6", "gtavi", "Grand Theft Auto", "Vice City").
+    Akzeptiert Strings und (verschachtelte) Listen."""
+    return any(_GTA_RE.search(p) for p in _flatten(parts))
+
+
+def _wants_gta(
+    gta: bool | None, hashtags: list[str], tags: list[str] | None, title: str | None, body: str
+) -> bool:
+    """#GTA6 nur bei GTA-Inhalten. Ohne jede Plan-Information (keine Hashtags/Tags/Titel) bleibt es beim
+    Kanal-Standard (GTA-Kanal -> #GTA6), damit alte Aufrufe/gespeicherte Clips sich nicht ändern."""
+    if gta is not None:
+        return gta
+    if is_gta_content(hashtags, tags or [], title or "", body):
+        return True
+    return not (hashtags or tags or (title or "").strip())
 
 
 # --------------------------------------------------------------------------- Credit / Beschreibung
@@ -129,6 +166,73 @@ def credit_line(c: CandidateIn) -> str:
     return line
 
 
+class _WordLike(Protocol):
+    text: str
+    start: float
+    end: float
+
+
+def _word_key(w: str) -> str:
+    return re.sub(r"[^\w]", "", w, flags=re.UNICODE).casefold()
+
+
+def clean_transcript(text: str, max_chars: int = TRANSCRIPT_MAX_CHARS) -> str:
+    """Gesprochener Text für die Beschreibung: einzeilig, ohne '#', '<', '>' (würden als Hashtag bzw. von
+    YouTube als ungültig gewertet), Whisper-Wiederholungen ("no no no no no") auf max. 2 gekürzt,
+    kein Leerzeichen vor Satzzeichen, max. max_chars Zeichen (an einer Wortgrenze mit "…")."""
+    t = _CTRL_RE.sub(" ", text or "").replace("#", "").replace("<", "").replace(">", "")
+    words: list[str] = []
+    run = 0
+    for w in t.split():
+        k = _word_key(w)
+        if words and k and k == _word_key(words[-1]):
+            run += 1
+            if run >= 2:
+                continue
+        else:
+            run = 0
+        words.append(w)
+    out = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", " ".join(words)).strip()
+    if not _word_key(out):  # nur Satzzeichen/Leerzeichen
+        return ""
+    return truncate(out, max_chars, len) if max_chars > 0 else out
+
+
+def transcript_text(
+    words: Iterable[_WordLike] | None, timemap: TimeMap | None = None, max_chars: int = TRANSCRIPT_MAX_CHARS
+) -> str:
+    """Gesprochene Wörter des fertigen Clips: nur Wörter, deren Mitte in einem behaltenen Abschnitt der
+    TimeMap liegt (Quellzeit), in Reihenfolge der Ausgabe. Ohne TimeMap: alle Wörter."""
+    picked: list[tuple[float, str]] = []
+    for w in words or []:
+        txt = str(getattr(w, "text", "") or "").strip()
+        if not txt:
+            continue
+        start, end = float(w.start), float(w.end)
+        mid = (start + max(start, end)) / 2
+        if timemap is None:
+            picked.append((mid, txt))
+            continue
+        out_t = timemap.to_output(mid)
+        if out_t is not None:
+            picked.append((out_t, txt))
+    picked.sort(key=lambda x: x[0])
+    return clean_transcript(" ".join(t for _, t in picked), max_chars)
+
+
+def transcript_in(description: str | None) -> str | None:
+    """Transkript-Block ("Transcript:" ...) aus einer fertigen Beschreibung (für Bearbeitungen), sonst None."""
+    d = (description or "").replace("\r\n", "\n")
+    i = d.find(TRANSCRIPT_LABEL)
+    if i < 0:
+        return None
+    block = d[i + len(TRANSCRIPT_LABEL):].strip()
+    lines = block.split("\n\n")[0].split("\n")  # bis zur Leerzeile vor den Hashtags
+    kept = [ln for ln in lines if not (ln.strip() and all(x.startswith("#") for x in ln.split()))]
+    t = " ".join(ln.strip() for ln in kept).strip()
+    return t or None
+
+
 def _clean_body(body: str) -> str:
     body = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     body = re.sub(r"[ \t]+\n", "\n", body)
@@ -136,32 +240,49 @@ def _clean_body(body: str) -> str:
 
 
 def compose_description(
-    platform: str, body: str, hashtags: list[str], c: CandidateIn, settings: Settings
+    platform: str,
+    body: str,
+    hashtags: list[str],
+    c: CandidateIn,
+    settings: Settings,
+    *,
+    transcript: str | None = None,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    gta: bool | None = None,
 ) -> str:
-    """body + Leerzeile + credit_line + Fan-Hinweis ("Fan channel – not affiliated with Rockstar Games.")
-    + Hashtags (#GTA6 immer dabei). Plattformlimits: YouTube-Beschreibung 5000, TikTok 2200,
-    Instagram 2200 Zeichen / max 30 Hashtags (wir nutzen <= 8)."""
+    """body + Leerzeile + credit_line + Fan-Hinweis (+ YouTube: "Transcript:"-Block mit dem gesprochenen Text,
+    gut für die Suche) + 3–5 Hashtags. #GTA6 nur bei GTA-Inhalten (gta=None: aus Titel/Hashtags/Tags/Text
+    erkannt). TikTok/Instagram bleiben kurz (kein Transkript). Plattformlimits: YouTube-Beschreibung 5000 Bytes,
+    TikTok/Instagram 2200 Zeichen."""
     limit = DESCRIPTION_LIMITS.get(platform, 2200)
     measure = measure_for(platform)
     body = _clean_body(body)
     if platform == "youtube":
         body = youtube_safe(body)
+    with_gta = _wants_gta(gta, list(hashtags or []), tags, title, body)
 
     # Hashtags, die schon im Text stehen, nicht wiederholen; insgesamt max. MAX_HASHTAGS
     body_tags = {t.lower() for t in hashtags_in(body)}
-    tags = [
+    pool = list(hashtags or [])
+    if tags and len({clean_hashtag(str(h)).lower() for h in pool} - {""}) < MIN_HASHTAGS:
+        pool += [t for t in tags if len(clean_hashtag(str(t))) <= 24]  # zu wenige -> mit Plan-Tags auffüllen
+    tags_out = [
         t
-        for t in normalize_hashtags(hashtags, limit=MAX_HASHTAGS + len(body_tags))
+        for t in normalize_hashtags(pool, limit=MAX_HASHTAGS + len(body_tags) + 1, gta=with_gta)
         if t.lower() not in body_tags
     ]
     budget = max(0, MAX_HASHTAGS - len(body_tags))
-    if REQUIRED_HASHTAG.lower() not in body_tags:
-        budget = max(1, budget)  # #GTA6 steht immer vorne in tags
-    tags = tags[:budget]
+    if with_gta and REQUIRED_HASHTAG.lower() not in body_tags:
+        budget = max(1, budget)  # #GTA6 steht immer vorne in tags_out
+    tags_out = tags_out[:budget]
 
     tail = credit_line(c) + "\n" + FAN_DISCLAIMER
-    if tags:
-        tail += "\n\n" + " ".join("#" + t for t in tags)
+    spoken = clean_transcript(transcript or "") if platform == "youtube" else ""
+    if spoken:
+        tail += f"\n\n{TRANSCRIPT_LABEL}\n{spoken}"
+    if tags_out:
+        tail += "\n\n" + " ".join("#" + t for t in tags_out)
     if platform == "youtube":
         tail = youtube_safe(tail)
     if not body:
