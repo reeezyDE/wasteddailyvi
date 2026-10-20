@@ -7,3 +7,5 @@ data/
 .env
 config.yaml
 client_secret*.json
+claude-home/
+backups/

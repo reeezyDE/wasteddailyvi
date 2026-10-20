@@ -1,0 +1,13 @@
+{# Caption zum Kopieren (TikTok-Inbox: der Entwurf kommt OHNE Text in der App an) #}
+{% macro caption_copy(p, hint) %}
+<div class="caption-box">
+  <p class="small hint">{{ hint }}</p>
+  <div class="caption-actions">
+    <button type="button" class="btn primary small" data-copy-target="caption-{{ p.id }}">📋 Caption kopieren</button>
+  </div>
+  <details class="caption-details">
+    <summary class="small muted">Caption ansehen</summary>
+    <pre class="caption" id="caption-{{ p.id }}">{{ p.caption }}</pre>
+  </details>
+</div>
+{% endmacro %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Creator{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Creator-Regeln</h1>
+  <p class="muted">Bestimme, wessen Clips verwendet werden.</p>
+</div>
+
+<section class="card explain">
+  <ul class="explain-list">
+    <li><span class="chip rule-block">Blockieren</span> Clips dieses Creators werden <strong>nie</strong> verwendet. Nutze das, wenn ein Streamer nicht gepostet werden möchte (Opt-out) oder eine Löschung/Takedown verlangt – solche Wünsche immer sofort respektieren.</li>
+    <li><span class="chip rule-allow">Erlauben</span> Erlaubnis liegt vor (z. B. per DM bestätigt) – wird als vertrauenswürdig markiert.</li>
+    <li><span class="chip rule-boost">Bevorzugen</span> Clips dieses Creators bekommen einen Bonus im Ranking.</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2 class="section-title">Regel hinzufügen</h2>
+  <form class="form-grid" method="post" action="/creators">
+    <label class="field">
+      <span class="field-label">Plattform</span>
+      <select name="platform_label" required>
+        {% for s in sources %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-label">Handle oder Kanal-Link</span>
+      <input type="text" name="handle" required maxlength="300" placeholder="z. B. xqc oder https://twitch.tv/xqc" autocomplete="off" autocapitalize="none" spellcheck="false">
+    </label>
+    <label class="field">
+      <span class="field-label">Regel</span>
+      <select name="rule" required>
+        {% for key, label in rule_names.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span class="field-label">Notiz <span class="muted">(optional)</span></span>
+      <input type="text" name="note" maxlength="300" placeholder="z. B. Opt-out per Mail am 20.10." autocomplete="off">
+    </label>
+    <div class="form-actions"><button type="submit" class="btn primary">Regel speichern</button></div>
+  </form>
+</section>
+
+<section class="section">
+  <h2 class="section-title">Aktive Regeln ({{ rules|length }})</h2>
+  {% if not rules %}
+  <p class="muted card">Noch keine Regeln. Ohne Regel werden alle Creator normal behandelt.</p>
+  {% endif %}
+  <ul class="list">
+  {% for r in rules %}
+    <li class="card row">
+      <div class="row-main">
+        <div class="row-top">
+          <span class="chip rule-{{ r.rule }}">{{ r.rule_label }}</span>
+          <span class="chip chip-src">{{ r.platform_label }}</span>
+          <strong class="handle">{{ r.handle }}</strong>
+        </div>
+        {% if r.note %}<p class="small muted">{{ r.note }}</p>{% endif %}
+        <p class="small muted">seit {{ r.created_at|ago }}</p>
+      </div>
+      <form method="post" action="/creators/{{ r.id }}/delete" data-confirm="Regel für {{ r.handle }} löschen?">
+        <button type="submit" class="btn danger small">Löschen</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endblock %}

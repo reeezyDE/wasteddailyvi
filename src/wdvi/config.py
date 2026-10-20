@@ -6,11 +6,12 @@ Alles, was geheim ist (API-Keys, Client-Secrets, Passwörter), kommt NUR aus der
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,10 +23,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class Secrets(BaseSettings):
     """Secrets aus Umgebungsvariablen (Präfix `WDVI_`) bzw. `.env`.
 
-    `ANTHROPIC_API_KEY` liest das Anthropic-SDK selbst; hier nur zur Statusanzeige.
+    `ANTHROPIC_API_KEY` liest das Anthropic-SDK selbst; hier nur zur Statusanzeige. Auch die optionalen,
+    nicht geheimen Umgebungs-Einstellungen (Redirect-URIs, yt-dlp-Cookies) kommen nur von hier – die
+    Module lesen sie nie selbst aus os.environ (sonst wirkt ein Eintrag in `.env` ohne Docker nicht).
     """
 
-    model_config = SettingsConfigDict(env_prefix="WDVI_", env_file=".env", extra="ignore")
+    # env_ignore_empty: "WDVI_X=" (leer, wie in .env.example) zählt als nicht gesetzt
+    model_config = SettingsConfigDict(
+        env_prefix="WDVI_", env_file=".env", extra="ignore", populate_by_name=True, env_ignore_empty=True
+    )
 
     twitch_client_id: str | None = None
     twitch_client_secret: str | None = None
@@ -39,6 +45,15 @@ class Secrets(BaseSettings):
     meta_app_secret: str | None = None
     dashboard_password: str | None = None
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    # optional: eigene https-Redirect-URIs (exakt so in der TikTok-/Meta-App registriert); leer =
+    # {dashboard.public_base_url}/oauth/<plattform>/callback mit https://
+    tiktok_redirect_uri: str | None = None
+    instagram_redirect_uri: str | None = None
+    # optional: cookies.txt (Netscape-Format) für yt-dlp, falls YouTube "Sign in to confirm you're not a bot"
+    # meldet. Der alte Name WDVI_YTDLP_COOKIES wird weiterhin gelesen.
+    ytdlp_cookies_file: str | None = Field(
+        default=None, validation_alias=AliasChoices("WDVI_YTDLP_COOKIES_FILE", "WDVI_YTDLP_COOKIES")
+    )
 
 
 # --------------------------------------------------------------------------- config
@@ -70,11 +85,12 @@ class LLMConfig(BaseModel):
     model: str = "claude-opus-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_frames: int = 8  # Standbilder pro Clip, die Claude sieht
-    frame_width: int = 640  # Breite der Standbilder (Tokenkosten!)
+    frame_width: int = 640  # lange Kante der Standbilder in px (Hochkant -> 360x640; Tokenkosten!)
     use_fallbacks: bool = True  # server-side refusal fallbacks ("default")
     cli_path: str = "claude"
     cli_timeout_s: int = 600
     max_calls_per_hour: int = 40
+    max_usd_per_day: float = 0  # Kostenbremse: geschätzte USD in den letzten 24 h (0 = keine Grenze)
 
 
 class TwitchSourceConfig(BaseModel):
@@ -137,6 +153,8 @@ class FilterConfig(BaseModel):
     phash_max_distance: int = 10
     candidates_per_cycle: int = 6  # wie viele Top-Kandidaten pro Verarbeitungszyklus
     max_candidate_age_hours: int = 48
+    # GTA-6-Release-Termin für Claude ("erscheint in N Tagen"); None = eingebauter Termin (brain/prompts.py)
+    gta6_release_date: date | None = None
 
 
 class CaptionStyle(BaseModel):
@@ -237,12 +255,27 @@ class PathsConfig(BaseModel):
         return self.data_dir / "cache"
 
     @property
+    def models_dir(self) -> Path:  # nachgeladene Modelle (YuNet von 'wdvi init'), überlebt Container-Neubau
+        return self.cache_dir / "models"
+
+    def face_model_paths(self, filename: str) -> tuple[Path, ...]:
+        """Suchreihenfolge fürs Gesichts-Modell: assets/models (im Docker-Image mitgeliefert), data/cache/models
+        ('wdvi init' bzw. Nachladen zur Laufzeit), data/cache (ältere Versionen)."""
+        return (self.assets_dir / "models" / filename, self.models_dir / filename, self.cache_dir / filename)
+
+    @property
     def fonts_dir(self) -> Path:
         return self.assets_dir / "fonts"
 
     def ensure(self) -> None:
         for p in (self.data_dir, self.work_dir, self.clips_dir, self.tokens_dir, self.cache_dir):
             p.mkdir(parents=True, exist_ok=True)
+
+
+class CleanupConfig(BaseModel):
+    keep_posted_days: int = 14  # Videos geposteter/gescheiterter Clips so lange behalten (0 = nie löschen)
+    review_expire_days: int = 7  # ungeprüfte Clips danach automatisch verwerfen (0 = nie)
+    min_free_gb: float = 5.0  # weniger freier Speicher in data/ -> keine neuen Clips verarbeiten (0 = aus)
 
 
 class WhisperConfig(BaseModel):
@@ -261,6 +294,7 @@ class AppConfig(BaseModel):
     publish: PublishConfig = PublishConfig()
     dashboard: DashboardConfig = DashboardConfig()
     feedback: FeedbackConfig = FeedbackConfig()
+    cleanup: CleanupConfig = CleanupConfig()
     paths: PathsConfig = PathsConfig()
 
 
@@ -269,14 +303,34 @@ class Settings(BaseModel):
 
     config: AppConfig
     secrets: Secrets
+    unknown_keys: list[str] = []  # Einträge in config.yaml, die es nicht gibt (Tippfehler, falsch eingerückt)
 
     model_config = {"arbitrary_types_allowed": True}
 
 
+def unknown_keys(data: object, model: type[BaseModel] = AppConfig, prefix: str = "") -> list[str]:
+    """Schlüssel in `data`, die `model` (rekursiv) nicht kennt – z. B. "publish.require_aproval"."""
+    if not isinstance(data, dict):
+        return []
+    out: list[str] = []
+    fields = model.model_fields
+    for key, value in data.items():
+        name = f"{prefix}{key}"
+        field = fields.get(str(key))
+        if field is None:
+            out.append(name)
+            continue
+        sub = field.annotation
+        if isinstance(sub, type) and issubclass(sub, BaseModel):
+            out += unknown_keys(value, sub, name + ".")
+    return out
+
+
 def load_config(path: str | Path | None = "config.yaml") -> Settings:
-    """Lädt `config.yaml` (fehlende Datei = Defaults) und Secrets aus der Umgebung."""
+    """Lädt `config.yaml` (fehlende Datei = Defaults) und Secrets aus der Umgebung. Unbekannte Einträge
+    werden nicht still verworfen, sondern in `Settings.unknown_keys` gemeldet (CLI/doctor zeigen sie an)."""
     data: dict = {}
     if path is not None and Path(path).exists():
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     cfg = AppConfig.model_validate(data)
-    return Settings(config=cfg, secrets=Secrets())
+    return Settings(config=cfg, secrets=Secrets(), unknown_keys=unknown_keys(data))

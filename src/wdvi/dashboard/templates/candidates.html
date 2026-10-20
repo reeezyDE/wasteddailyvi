@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Kandidaten{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Kandidaten</h1>
+  <p class="muted">Was die Quellen gefunden haben und was daraus wurde ({{ total|num }} insgesamt)</p>
+</div>
+
+<nav class="filters" aria-label="Nach Status filtern">
+  <a class="pill{% if not status %} active{% endif %}" href="/candidates">Alle <span class="pill-count">{{ total|num }}</span></a>
+  {% for f in filters %}
+  <a class="pill status-{{ f.status }}{% if status == f.status %} active{% endif %}" href="/candidates?status={{ f.status|urlencode }}">{{ f.label }} <span class="pill-count">{{ f.count|num }}</span></a>
+  {% endfor %}
+</nav>
+
+{% if not rows %}
+<section class="empty card">
+  <div class="empty-emoji" aria-hidden="true">🔎</div>
+  <h2>Keine Kandidaten{% if status %} mit diesem Status{% endif %}</h2>
+  <p class="muted">Die Quellen werden regelmäßig abgefragt – schau unter <a href="/health">Status</a>, ob die Jobs laufen.</p>
+</section>
+{% endif %}
+
+<ul class="list">
+{% for c in rows %}
+  <li class="card row cand">
+    {% if c.thumbnail_url|safe_url %}<img class="thumb thumb-wide" src="{{ c.thumbnail_url|safe_url }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% endif %}
+    <div class="row-main">
+      <div class="row-top">
+        <span class="chip status-{{ c.status }}">{{ c.status_label }}</span>
+        <span class="chip chip-src">{{ c.platform_label }}</span>
+        <span class="small muted">Prescore {{ "%.1f"|format(c.prescore or 0) }}</span>
+      </div>
+      <p class="row-title">
+        {% if c.url|safe_url %}<a href="{{ c.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ c.title }}</a>{% else %}{{ c.title }}{% endif %}
+      </p>
+      <p class="small muted">
+        👤 {{ c.creator_name }}{% if c.view_count is not none %} · 👁 {{ c.view_count|num }}{% endif %}{% if c.duration_s %} · {{ c.duration_s|dur }}{% endif %}
+        {% if c.start_s is not none %} · Ausschnitt {{ c.start_s|dur }}–{{ c.end_s|dur }}{% endif %}
+        · gefunden {{ c.discovered_at|ago }}
+      </p>
+      {% if c.status_reason %}<p class="small reason-text">{{ c.status_reason }}</p>{% endif %}
+    </div>
+  </li>
+{% endfor %}
+</ul>
+{% endblock %}

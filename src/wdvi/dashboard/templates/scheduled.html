@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Geplant{% endblock %}
+{% block content %}
+{% from "_macros.html" import caption_copy %}
+<div class="page-head">
+  <h1 class="page-title">Geplant</h1>
+  <p class="muted">{{ total }} anstehende{{ "r" if total == 1 }} Post{{ "s" if total != 1 }}{% if waiting %} · {{ waiting|length }} Clip{{ "s" if waiting|length != 1 }} noch ohne Termin{% endif %} · Zeiten in <strong>{{ tz_label }}</strong>-Zeit ({{ tz_name }})</p>
+</div>
+{% if not tz_ok %}
+<div class="flash flash-error"><span class="flash-icon">!</span><span>Zeitzone „{{ tz_name }}“ ist auf diesem System nicht verfügbar – Zeiten werden in UTC angezeigt. Lösung: Paket <code>tzdata</code> installieren.</span></div>
+{% endif %}
+
+{% if waiting %}
+<section class="section day-group">
+  <h2 class="day-label">Freigegeben, noch nicht eingeplant</h2>
+  <ul class="list">
+  {% for w in waiting %}
+    <li class="card row post" id="waiting-{{ w.id }}">
+      {% if w.clip.thumb_url %}<img class="thumb" src="{{ w.clip.thumb_url }}" alt="" loading="lazy">{% else %}<div class="thumb thumb-empty" aria-hidden="true">🎬</div>{% endif %}
+      <div class="row-main">
+        <div class="row-top">
+          <span class="chip chip-warn">Wartet</span>
+          {% for pl in w.platforms %}<span class="chip chip-{{ pl.platform }}">{{ pl.name }}</span>{% endfor %}
+        </div>
+        <p class="row-title">{{ w.title }}</p>
+        {% if w.error %}
+        <p class="small hint">Noch nicht eingeplant: {{ w.error }}</p>
+        {% else %}
+        <p class="small muted">Wird beim nächsten Durchlauf (alle paar Minuten) eingeplant.</p>
+        {% endif %}
+      </div>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if not groups and not waiting %}
+<section class="empty card">
+  <div class="empty-emoji" aria-hidden="true">🗓️</div>
+  <h2>Nichts geplant</h2>
+  <p class="muted">Freigegebene Clips landen automatisch im nächsten freien Slot.</p>
+  <div class="row-actions center"><a class="btn primary" href="/">Zur Review</a></div>
+</section>
+{% endif %}
+
+{% for g in groups %}
+<section class="day-group">
+  <h2 class="day-label">{{ g.label }}</h2>
+  <ul class="list">
+  {% for p in g.posts %}
+    <li class="card row post" id="post-{{ p.id }}">
+      {% if p.clip.thumb_url %}<img class="thumb" src="{{ p.clip.thumb_url }}" alt="" loading="lazy">{% else %}<div class="thumb thumb-empty" aria-hidden="true">🎬</div>{% endif %}
+      <div class="row-main">
+        <div class="row-top">
+          <time class="time-big" datetime="{{ p.scheduled_at|iso }}" data-utc="{{ p.scheduled_at|iso }}">{{ p.scheduled_at|local(false) }}</time>
+          <span class="chip chip-{{ p.platform }}">{{ p.platform_name }}</span>
+          {% if p.status != "scheduled" %}<span class="chip chip-warn">{{ p.status_label }}</span>{% endif %}
+        </div>
+        <p class="row-title">{{ p.title }}</p>
+        <p class="small muted">{{ p.scheduled_at|ago }}{% if p.clip.creator %} · Credit {{ p.clip.creator }}{% endif %}{% if p.attempts %} · {{ p.attempts }} Versuch{{ "e" if p.attempts != 1 }}{% endif %}</p>
+        {% if p.awaiting_check %}<p class="small hint">Termin erreicht – WastedDailyVI prüft in den nächsten Minuten, ob {{ p.platform_name }} das Video wirklich veröffentlicht hat (ohne API-Audit bleibt es privat).</p>
+        {% elif p.remote_id %}<p class="small hint">Bereits bei {{ p.platform_name }} hochgeladen und dort geplant.</p>{% endif %}
+        {# nach erfolgreichem Vorab-Upload ist "error" nur ein Hinweis #}
+        {% if p.error %}<p class="small {{ 'hint' if p.remote_id else 'error-text' }}">{{ p.error }}</p>{% endif %}
+        {% if p.platform == "tiktok" and tiktok_inbox and p.caption %}
+        {{ caption_copy(p, "Inbox-Modus: Das Video kommt als Entwurf OHNE Text in die TikTok-App – Caption kopieren und dort einfügen (steht nach dem Senden auch unter „Gepostet“).") }}
+        {% endif %}
+      </div>
+      {% if p.status == "scheduled" %}
+      <form method="post" action="/posts/{{ p.id }}/cancel" data-confirm="{{ p.platform_name }}-Post wirklich abbrechen?{% if p.remote_id %} Das Video ist schon hochgeladen und wird bei {{ p.platform_name }} auf privat ohne Termin zurückgezogen (klappt das nicht, steht es in der Meldung – dann selbst löschen).{% endif %}">
+        <button type="submit" class="btn danger small" aria-label="Post abbrechen">Abbrechen</button>
+      </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+{% endblock %}

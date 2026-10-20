@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Fehler {{ code }}{% endblock %}
+{% block content %}
+<section class="empty card">
+  <div class="empty-emoji wasted" aria-hidden="true">WASTED</div>
+  <h1 class="page-title">Fehler {{ code }}</h1>
+  <p>{{ detail }}</p>
+  <div class="row-actions center"><a class="btn primary" href="/">Zur Review</a></div>
+</section>
+{% endblock %}

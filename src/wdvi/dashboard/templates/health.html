@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Status</h1>
+  <p class="muted">Läuft alles? Hintergrundjobs, Zähler und Konfiguration.</p>
+</div>
+
+<section class="section">
+  <h2 class="section-title">Hintergrundjobs</h2>
+  {% if not h.jobs %}
+  <p class="card muted">Noch keine Job-Läufe aufgezeichnet. Läuft der Worker (<code>wdvi run</code>)?</p>
+  {% endif %}
+  <ul class="list">
+  {% for j in h.jobs %}
+    <li class="card row job job-{{ j.state }}">
+      <span class="dot dot-{{ j.state }}" aria-hidden="true"></span>
+      <div class="row-main">
+        <div class="row-top">
+          <strong class="job-name">{{ j.job }}</strong>
+          {% if j.state == "ok" %}<span class="chip chip-ok">OK</span>
+          {% elif j.state == "running" %}<span class="chip chip-info">läuft</span>
+          {% elif j.state == "stale" %}<span class="chip chip-warn">überfällig</span>
+          {% else %}<span class="chip chip-bad">Fehler</span>{% endif %}
+          {% if j.fails_24h %}<span class="chip chip-bad">{{ j.fails_24h }}× Fehler in 24 h</span>{% endif %}
+        </div>
+        <p class="small muted">
+          Letzter Lauf {{ (j.finished_at or j.started_at)|ago }}
+          {% if j.duration_s is not none %} · Dauer {{ j.duration_s|dur }}{% endif %}
+        </p>
+        {% if j.message %}<p class="small {{ 'error-text' if not j.ok else 'muted' }}">{{ j.message }}</p>{% endif %}
+      </div>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+
+<section class="section">
+  <h2 class="section-title">Zähler</h2>
+  <div class="count-groups">
+    {% for group, title, labels in [("candidates", "Kandidaten", candidate_status), ("clips", "Clips", clip_status), ("posts", "Posts", post_status)] %}
+    <div class="card count-card">
+      <h3>{{ title }}</h3>
+      {% set counts = h.counts[group] %}
+      {% if not counts %}<p class="small muted">–</p>{% endif %}
+      <dl class="kv">
+        {% for status, n in counts|dictsort %}
+        <dt>{{ labels.get(status, status) }}</dt><dd>{{ n|num }}</dd>
+        {% endfor %}
+      </dl>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="section">
+  <h2 class="section-title">System</h2>
+  <div class="card">
+    <dl class="kv">
+      <dt>Claude-Backend</dt><dd>{{ "Anthropic-API" if h.llm.backend == "api" else "Claude-Code-CLI" }} ({{ h.llm.backend }})</dd>
+      <dt>Modell</dt><dd><code>{{ h.llm.model }}</code> · Effort {{ h.llm.effort }}</dd>
+      <dt>Encoder</dt><dd>{{ h.encoder }}{% if h.encoder != "x264" %} · NVIDIA-Tool {{ "gefunden ✓" if h.nvidia_smi else "nicht gefunden" }}{% endif %}</dd>
+      <dt>ffmpeg</dt><dd>{{ "gefunden ✓" if h.ffmpeg else "FEHLT ✗" }}</dd>
+      <dt>Pipeline</dt><dd>{{ "aktiv ✓" if h.pipeline else "nicht verbunden (nur Ansicht)" }}</dd>
+      <dt>Freigabe nötig</dt><dd>{{ "ja" if h.require_approval else "nein – Clips gehen ohne Review raus" }}</dd>
+      <dt>Zeitzone</dt><dd>{{ h.timezone }}{% if not h.tz_ok %} <span class="error-text">(nicht verfügbar – UTC wird benutzt)</span>{% endif %}</dd>
+      <dt>Dashboard-Passwort</dt><dd>{{ "gesetzt ✓" if h.password_set else "nicht gesetzt (nur localhost)" }}</dd>
+      {% if h.disk %}<dt>Freier Speicher</dt><dd{% if h.disk.low %} class="error-text"{% endif %}>{{ ("%.1f"|format(h.disk.free_gb))|replace(".", ",") }} GB von {{ "%.0f"|format(h.disk.total_gb) }} GB{% if h.disk.low %} – wird knapp!{% endif %}</dd>{% endif %}
+      {% for p in h.platforms %}
+      <dt>{{ p.name }}</dt><dd>{{ "verbunden ✓" if p.connected else ("eingerichtet, nicht verbunden" if p.configured else "nicht eingerichtet") }}</dd>
+      {% endfor %}
+    </dl>
+  </div>
+</section>
+
+<section class="section">
+  <h2 class="section-title">Secrets</h2>
+  <p class="small muted">Nur ob ein Wert gesetzt ist – Werte werden nie angezeigt.</p>
+  <ul class="card secret-list">
+  {% for s in h.secrets %}
+    <li><span class="dot dot-{{ 'ok' if s.present else 'off' }}" aria-hidden="true"></span><code>{{ s.env }}</code><span class="secret-state">{{ "gesetzt" if s.present else "fehlt" }}{% if s.note %} · {{ s.note }}{% endif %}</span></li>
+  {% endfor %}
+  </ul>
+</section>
+{% endblock %}

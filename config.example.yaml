@@ -1,0 +1,215 @@
+# =============================================================================
+#  WastedDailyVI – Konfiguration („Wasted Daily | GTA 6 Clips“, @WastedDailyVI)
+#
+#  1. Diese Datei nach config.yaml kopieren:   cp config.example.yaml config.yaml
+#  2. Anpassen (vor allem: YouTube-Kanäle, Posting-Zeiten, Plattformen).
+#  3. Neu starten:                             docker compose restart
+#
+#  Geheimnisse (API-Keys, Passwörter, Client-Secrets) gehören NICHT hierher,
+#  sondern in die Datei .env (Vorlage: .env.example).
+#  Fehlende Einträge = Standardwert. Zeiten in Sekunden, wenn nicht anders angegeben.
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# Marke: Aussehen der Videos
+# ----------------------------------------------------------------------------
+brand:
+  name: "Wasted Daily"
+  handle: "WastedDailyVI"                 # erscheint als Wasserzeichen @WastedDailyVI
+  display_name: "Wasted Daily | GTA 6 Clips"
+  # Neon-Vice-City-Farben (Hex, ohne Alpha)
+  color_primary: "#FF2D87"                # Pink – aktives Wort in den Captions, Hook-Verlauf
+  color_secondary: "#FF8A00"              # Orange – Hook-Verlauf, hervorgehobene Schlüsselwörter
+  color_accent: "#7B2FF7"                 # Lila – Trennlinie im Facecam-Layout
+  color_wasted: "#E0112B"                 # WASTED-Rot
+  color_text: "#FFFFFF"
+  color_outline: "#000000"
+  font_captions: "ArchivoBlack-Regular.ttf"   # Datei in assets/fonts/
+  font_hook: "Anton-Regular.ttf"
+  caption_uppercase: true                 # Captions in GROSSBUCHSTABEN (Submagic-Stil)
+  caption_max_words: 3                    # max. Wörter pro Caption-Einblendung
+  caption_max_chars: 18                   # max. Zeichen pro Caption-Einblendung
+  show_credit: true                       # Creator-Credit oben links im Video – bitte anlassen!
+  show_watermark: true                    # @WastedDailyVI klein unten rechts
+
+# ----------------------------------------------------------------------------
+# Claude: bewertet jeden Clip und plant den Schnitt
+# ----------------------------------------------------------------------------
+llm:
+  # "api" = Anthropic-API (ANTHROPIC_API_KEY in .env, Abrechnung pro Clip)
+  # "cli" = Claude-Code-CLI mit deinem Claude-Abo (Docker mit WITH_CLAUDE_CLI=1 bauen, siehe docs/SETUP.md)
+  backend: "api"
+  model: "claude-opus-5-5"
+  effort: "high"                          # low | medium | high | xhigh | max – höher = gründlicher, teurer
+  max_frames: 8                           # Standbilder pro Clip, die Claude sieht (mehr = teurer)
+  frame_width: 640                        # lange Kante dieser Standbilder in Pixeln (Hochkant -> 360x640; Tokenkosten!)
+  use_fallbacks: true                     # bei einer Ablehnung automatisch ein Ersatzmodell versuchen
+  cli_path: "claude"                      # nur backend "cli": Programmname/Pfad der CLI
+  cli_timeout_s: 600                      # nur backend "cli": max. Dauer pro Aufruf
+  max_calls_per_hour: 20                  # Kostenbremse: max. Claude-Aufrufe pro Stunde (je ca. 0,05–0,15 $)
+  max_usd_per_day: 0                      # Kostenbremse: max. geschätzte Claude-Kosten in 24 h in US-$ (0 = keine Grenze);
+                                          # erreicht -> Clips warten, bis wieder Budget frei ist (nur backend "api" zählt genau)
+
+# ----------------------------------------------------------------------------
+# Whisper: Transkription für die Wort-für-Wort-Captions
+# ----------------------------------------------------------------------------
+whisper:
+  model: "large-v3-turbo"                 # schnell + gut. Schwache GPU/CPU: "small" oder "medium"
+  device: "auto"                          # auto | cuda | cpu
+  compute_type: "auto"                    # auto = float16 auf der GPU, int8 auf der CPU
+
+# ----------------------------------------------------------------------------
+# Quellen: wo nach viralen GTA-6-Clips gesucht wird
+# ----------------------------------------------------------------------------
+sources:
+  twitch:                                 # braucht WDVI_TWITCH_CLIENT_ID/SECRET in .env
+    enabled: true
+    game_names: ["Grand Theft Auto VI"]   # exakter Kategoriename auf Twitch
+    languages: ["en"]                     # nur Clips in diesen Stream-Sprachen; [] = alle
+    lookback_hours: 24                    # Clips der letzten 24 Stunden
+    min_views: 500                        # Mindest-Aufrufe eines Clips (höher = weniger, aber bessere Kandidaten)
+    max_clips_per_poll: 100
+    poll_minutes: 10                      # alle 10 Minuten nachsehen
+
+  kick:                                   # inoffizielle Schnittstelle – experimentell, kann blockiert werden
+    enabled: false
+    category_slugs: ["grand-theft-auto-vi"]
+    time_range: "day"                     # day | week
+    min_views: 300
+    poll_minutes: 15
+
+  youtube:                                # neue Videos von Kanälen (RSS, ohne API-Key)
+    enabled: true
+    # Kanal-IDs (beginnen mit "UC", 24 Zeichen) von GTA-Creatorn/Streamern, deren lange Videos
+    # in Shorts-Momente zerlegt werden sollen. Wie man die ID findet: docs/SETUP.md → „YouTube-Kanal-IDs“.
+    # Nur Creator nehmen, die Clips erlauben oder die du um Erlaubnis gefragt hast!
+    channel_ids: []
+    # channel_ids:
+    #   - "UCxxxxxxxxxxxxxxxxxxxxxx"      # Beispiel: GTA-6-News-Kanal
+    #   - "UCyyyyyyyyyyyyyyyyyyyyyy"      # Beispiel: GTA-RP-Streamer (Stream-Highlights)
+    #   - "UCzzzzzzzzzzzzzzzzzzzzzz"      # Beispiel: Stunt-/Glitch-Kanal
+    search_queries: []                    # optional, braucht WDVI_YOUTUBE_API_KEY (100 Quota-Einheiten/Suche)
+    # search_queries: ["GTA 6 funny moments", "GTA 6 stunt"]
+    max_age_hours: 48                     # nur Videos der letzten 48 Stunden
+    min_video_minutes: 3.0                # kürzer = vermutlich ein Short -> wird nicht recycelt
+    max_video_minutes: 240.0              # längere Videos (z. B. 10-h-Streams) überspringen
+    moments_per_video: 3                  # so viele Ausschnitte schlägt Claude pro Video höchstens vor
+    poll_minutes: 15
+
+  reddit:                                 # ohne Zugangsdaten über die öffentliche JSON-Schnittstelle
+    enabled: true
+    subreddits: ["GTA6"]
+    listings: ["hot", "top"]              # hot | top | rising
+    top_time: "day"                       # Zeitraum für "top": hour | day | week
+    min_score: 300                        # Mindest-Upvotes
+    user_agent: "wdvi/0.1 (by u/WastedDailyVI)"   # Reddit verlangt einen eindeutigen User-Agent
+    poll_minutes: 20
+
+# ----------------------------------------------------------------------------
+# Filter: was überhaupt zu Claude kommt und was gepostet werden darf
+# ----------------------------------------------------------------------------
+filters:
+  min_source_duration_s: 5.0              # kürzere Clips überspringen
+  max_source_duration_s: 180.0            # längere Clips überspringen (gilt nicht für lange YouTube-Videos)
+  max_output_duration_s: 59.0             # fertiges Short < 60 s (Shorts > 1 min mit Content-ID-Claim werden gesperrt)
+  min_output_duration_s: 7.0
+  languages: ["en"]                       # von Whisper erkannte Sprache; [] = alle
+  min_virality_score: 70                  # 0–100 (Claudes Einschätzung); darunter wird verworfen
+  leak_policy: "reject"                   # "reject" = Leaks/unveröffentlichtes Material verwerfen (dringend empfohlen)
+  music_policy: "reject"                  # "reject" = Clips mit erkannter Musik verwerfen (Copyright!)
+  music_threshold: 0.45                   # ab dieser Musik-Wahrscheinlichkeit gilt Musik als erkannt
+  dedup_days: 14                          # Reposts desselben Clips innerhalb von 14 Tagen erkennen
+  phash_max_distance: 10                  # Toleranz der Bild-Ähnlichkeit (kleiner = strenger)
+  candidates_per_cycle: 6                 # so viele Kandidaten pro Durchlauf (alle 2 min) verarbeiten
+  max_candidate_age_hours: 48             # ältere Kandidaten werden übersprungen
+  gta6_release_date: null                 # GTA-6-Release für Claude ("erscheint in N Tagen"); null = eingebauter Termin
+                                          # (19.11.2026). Bei einer Verschiebung z. B. "2027-03-01" eintragen
+
+# ----------------------------------------------------------------------------
+# Rendern: Format und Effekte der Shorts
+# ----------------------------------------------------------------------------
+render:
+  width: 1080
+  height: 1920                            # 9:16
+  fps: 30
+  encoder: "auto"                         # auto (NVENC, falls GPU da) | nvenc | x264
+  x264_crf: 18                            # Qualität CPU-Encoder (kleiner = besser/größer)
+  nvenc_cq: 19                            # Qualität GPU-Encoder
+  audio_bitrate: "192k"
+  target_lufs: -14.0                      # Lautheit wie YouTube/TikTok
+  hook_seconds: 3.0                       # so lange steht der Hook-Titel oben im Bild
+  captions:
+    font_size: 82
+    outline: 7                            # Randstärke der Captions
+    shadow: 3
+    y_ratio: 0.66                         # vertikale Position (0 = oben, 1 = unten); Platz für die App-Buttons lassen
+    pop_ms: 90                            # Pop-Animation des aktiven Wortes (Millisekunden)
+    active_scale: 112                     # aktives Wort wird auf 112 % vergrößert
+  sfx: true                               # Soundeffekte (whoosh bei Zooms, boom/pop an Highlights)
+  sfx_gain_db: -8.0
+  music_bed: false                        # eigene LIZENZFREIE Musik aus assets/music unterlegen
+  music_gain_db: -24.0
+  split_facecam_ratio: 0.40               # Anteil der Bildhöhe für die Facecam im Split-Layout
+
+# ----------------------------------------------------------------------------
+# Posten: Plattformen und Uhrzeiten
+# ----------------------------------------------------------------------------
+publish:
+  timezone: "America/New_York"            # Slots in US-Ostküstenzeit (Hauptpublikum USA)
+  require_approval: true                  # true = jeder Clip wartet im Dashboard auf deine Freigabe (empfohlen!)
+  min_gap_minutes: 90                     # Mindestabstand zwischen zwei Posts pro Plattform
+
+  youtube:                                # YouTube Shorts (braucht client_secret.json, siehe docs/SETUP.md)
+    enabled: true
+    slots: ["08:00", "11:30", "14:30", "17:30", "20:30"]   # HH:MM in publish.timezone
+    privacy: "public"                     # public | unlisted | private
+    native_schedule: true                 # vorab als "privat + geplant" hochladen, YouTube veröffentlicht pünktlich
+    category_id: "20"                     # 20 = Gaming
+    made_for_kids: false
+    max_uploads_per_day: 6                # Standard-API-Kontingent reicht für ~6 Uploads pro Tag
+
+  tiktok:                                 # braucht WDVI_TIKTOK_CLIENT_KEY/SECRET
+    enabled: true
+    # "inbox"  = Video landet als Entwurf in deiner TikTok-App, du tippst nur noch auf „Posten“
+    # "direct" = direkt veröffentlichen (erst nach TikTok-App-Prüfung öffentlich möglich)
+    mode: "inbox"
+    slots: ["10:00", "13:00", "16:00", "19:00", "21:30"]
+    privacy_level: "PUBLIC_TO_EVERYONE"   # ohne App-Prüfung nur "SELF_ONLY" möglich
+
+  instagram:                              # Reels (Business-/Creator-Konto, braucht WDVI_META_APP_ID/SECRET)
+    enabled: true
+    slots: ["09:00", "12:00", "15:00", "18:30", "21:00"]
+    share_to_feed: true                   # Reel zusätzlich im Profil-Feed zeigen
+    graph_version: "v23.0"
+
+# ----------------------------------------------------------------------------
+# Dashboard (Review im Browser / am Handy)
+# ----------------------------------------------------------------------------
+dashboard:
+  host: "127.0.0.1"                       # im Docker-Container automatisch 0.0.0.0 (WDVI_HOST) – hier nichts ändern
+  port: 8420                              # Port im Container – am PC einen anderen Port: WDVI_HOST_PORT in .env
+  public_base_url: "http://localhost:8420"   # Adresse, unter der DU das Dashboard öffnest (für OAuth-Redirects)
+
+# ----------------------------------------------------------------------------
+# Feedback: Claude lernt aus den Aufrufzahlen deiner bisherigen Posts
+# ----------------------------------------------------------------------------
+feedback:
+  enabled: true
+  fetch_after_hours: [24, 72]             # Aufrufe 24 h und 72 h nach dem Posten abfragen
+  examples_in_prompt: 6                   # beste + schwächste Posts als Beispiele für Claude
+
+# ----------------------------------------------------------------------------
+# Aufräumen: damit die Festplatte im Dauerbetrieb nicht vollläuft (täglich 04:00 UTC)
+# ----------------------------------------------------------------------------
+cleanup:
+  keep_posted_days: 14                    # Videos geposteter/gescheiterter Clips nach 14 Tagen löschen (0 = nie);
+                                          # das Vorschaubild bleibt, die Videos liegen ja auf den Plattformen
+  review_expire_days: 7                   # nicht geprüfte Clips nach 7 Tagen automatisch verwerfen (0 = nie)
+  min_free_gb: 5.0                        # weniger freier Speicher -> keine neuen Clips, Meldung unter Health
+
+# ----------------------------------------------------------------------------
+# Ordner
+# ----------------------------------------------------------------------------
+paths:
+  data_dir: "data"                        # Datenbank, Downloads, fertige Clips, OAuth-Tokens (Docker: ./data)
+  # assets_dir: "assets"                  # Schriften, Gesichts-Modell, Soundeffekte (Standard: assets/ im Projekt)

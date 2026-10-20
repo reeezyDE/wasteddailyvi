@@ -1,0 +1,22 @@
+# Nicht ins Docker-Image kopieren (Secrets, Daten, Caches, Entwicklungsdateien)
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.env
+config.yaml
+client_secret*.json
+data
+claude-home
+backups
+tests
+docs
+*.log
+.idea
+.vscode
+.DS_Store

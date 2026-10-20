@@ -1,0 +1,5 @@
+# Shell-Skripte immer mit LF (sonst startet der Container unter Windows-Checkouts nicht)
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

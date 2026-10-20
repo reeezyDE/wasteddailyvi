@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Verbindungen{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Verbindungen</h1>
+  <p class="muted">Konten, auf die WastedDailyVI posten darf.</p>
+</div>
+
+{% if not conns %}
+<section class="empty card">
+  <div class="empty-emoji" aria-hidden="true">🔌</div>
+  <h2>Keine Plattform aktiv</h2>
+  <p class="muted">In der <code>config.yaml</code> unter <code>publish:</code> mindestens eine Plattform mit <code>enabled: true</code> einschalten.</p>
+</section>
+{% endif %}
+
+{% for c in conns %}
+<section class="card conn" id="conn-{{ c.platform }}">
+  <div class="conn-head">
+    <h2 class="conn-name">{{ c.name }}</h2>
+    {% if c.connected %}
+    <span class="status-pill ok">● Verbunden</span>
+    {% elif c.configured %}
+    <span class="status-pill warn">● Nicht verbunden</span>
+    {% else %}
+    <span class="status-pill bad">● Nicht eingerichtet</span>
+    {% endif %}
+  </div>
+
+  {% if not c.configured %}
+  <p class="small">App-Zugangsdaten fehlen. In der <code>.env</code> setzen: <code>{{ c.setup_hint }}</code> – danach neu starten.</p>
+  {% endif %}
+  {% if c.error %}<p class="small error-text">{{ c.error }}</p>{% endif %}
+
+  <div class="row-actions">
+    {% if c.configured %}
+    <a class="btn primary" href="/oauth/{{ c.platform }}/start">{{ "Neu verbinden" if c.connected else "Verbinden" }}</a>
+    {% else %}
+    <span class="btn primary disabled" aria-disabled="true">Verbinden</span>
+    {% endif %}
+    {% if c.connected and c.can_disconnect %}
+    <form method="post" action="/oauth/{{ c.platform }}/disconnect" data-confirm="{{ c.name }} wirklich trennen? Geplante Posts schlagen dann fehl.">
+      <button type="submit" class="btn ghost">Trennen</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if c.redirect_uri %}
+  <p class="small muted">Redirect-URL (genau so in der {{ c.name }}-App eintragen):<br><code class="copy" data-copy>{{ c.redirect_uri }}</code></p>
+  {% endif %}
+
+  <details class="paste"{% if c.https_only and c.configured and not c.connected %} open{% endif %}>
+    <summary>Redirect-URL einfügen{% if c.https_only %} <span class="muted">(nötig ohne https)</span>{% endif %}</summary>
+    <p class="small">
+      {% if c.https_only %}{{ c.name }} erlaubt nur https-Redirects.{% endif %}
+      Landest du nach der Anmeldung auf einer Fehlerseite („Seite nicht erreichbar“)? Kein Problem:
+      kopiere die <strong>komplette Adresse</strong> aus der Adresszeile (enthält <code>code=</code> und <code>state=</code>) und füge sie hier ein. Gültig 15 Minuten nach dem Klick auf „Verbinden“.
+    </p>
+    <form method="post" action="/oauth/{{ c.platform }}/paste" class="stack">
+      <label class="field">
+        <span class="field-label">Adresse der Fehlerseite</span>
+        <input type="text" inputmode="url" name="url" required placeholder="https://…/oauth/{{ c.platform }}/callback?code=…&amp;state=…" autocomplete="off" autocapitalize="none" spellcheck="false">
+      </label>
+      <button type="submit" class="btn primary">Verbindung abschließen</button>
+    </form>
+  </details>
+
+  {% if c.platform == "instagram" %}
+  <details class="paste">
+    <summary>Token einfügen <span class="muted">(Alternative)</span></summary>
+    <p class="small">Im Meta-App-Dashboard unter „Instagram API with Instagram login“ → „Generate token“ ein Token erzeugen und hier mit der Instagram-User-ID einfügen. Es wird automatisch verlängert.</p>
+    <form method="post" action="/oauth/instagram/token" class="stack">
+      <label class="field">
+        <span class="field-label">Access-Token</span>
+        <input type="password" name="access_token" required autocomplete="off" autocapitalize="none" spellcheck="false">
+      </label>
+      <label class="field">
+        <span class="field-label">Instagram-User-ID <span class="muted">(optional, nur Ziffern)</span></span>
+        <input type="text" name="user_id" inputmode="numeric" pattern="[0-9]*" autocomplete="off">
+      </label>
+      <button type="submit" class="btn primary">Token speichern</button>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% endfor %}
+
+<p class="small muted">Öffentliche Basis-URL des Dashboards: <code>{{ public_base_url }}</code> (config.yaml → <code>dashboard.public_base_url</code>).</p>
+{% endblock %}

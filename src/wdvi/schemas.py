@@ -112,7 +112,7 @@ class FaceDet(BaseModel):
 
 class FrameSample(BaseModel):
     t: float  # Quellzeit
-    path: str  # JPEG auf Platte (Breite = llm.frame_width)
+    path: str  # JPEG auf Platte (lange Kante = llm.frame_width, Seitenverhältnis bleibt)
     faces: list[FaceDet] = Field(default_factory=list)
 
 
@@ -292,6 +292,10 @@ class PostResult(BaseModel):
     remote_url: str | None = None
     status: Literal["posted", "scheduled", "draft_sent", "failed"] = "failed"
     error: str | None = None
+    # optional für Fehlschläge: True = vorübergehend (Netz/Limit, kein Fehlversuch), False = endgültig,
+    # None = Pipeline ordnet anhand der Fehlermeldung ein; retry_after_s = frühestens nach so vielen Sekunden
+    retryable: bool | None = None
+    retry_after_s: float | None = None
 
 
 class PostMetrics(BaseModel):

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0a12">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Wasted Daily">
+<title>{% block title %}Dashboard{% endblock %} · {{ brand.name }}</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/app.css?v={{ static_v }}">
+<script src="/static/app.js?v={{ static_v }}" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="{{ brand.display_name }} – Review">
+      <span class="brand-mark" aria-hidden="true">W</span>
+      <span class="brand-text"><span class="brand-name">{{ brand.name }}</span><span class="brand-handle">@{{ brand.handle }}</span></span>
+    </a>
+    <nav class="tabs" aria-label="Hauptmenü">
+      {% set nav = [
+        ("review", "/", "Review"),
+        ("scheduled", "/scheduled", "Geplant"),
+        ("posted", "/posted", "Gepostet"),
+        ("candidates", "/candidates", "Kandidaten"),
+        ("creators", "/creators", "Creator"),
+        ("connections", "/connections", "Verbindungen"),
+        ("health", "/health", "Status"),
+      ] %}
+      {% for key, href, label in nav %}
+      <a class="tab{% if active == key %} active{% endif %}" href="{{ href }}"{% if active == key %} aria-current="page"{% endif %}>
+        {{ label }}{% if key == "review" and pending_count %} <span class="count" data-pending-count>{{ pending_count }}</span>{% endif %}
+      </a>
+      {% endfor %}
+    </nav>
+  </div>
+</header>
+
+<main class="container{% block container_class %}{% endblock %}">
+  {% if flash %}
+  <div class="flash flash-{{ flash.kind }}" role="{{ 'alert' if flash.kind == 'error' else 'status' }}">
+    <span class="flash-icon" aria-hidden="true">{{ "✓" if flash.kind == "ok" else "!" }}</span>
+    <span>{{ flash.text }}</span>
+  </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<footer class="footer">
+  <span>{{ brand.display_name }}</span>
+  <span class="muted">Fan-Kanal – nicht mit Rockstar Games oder Take-Two verbunden.</span>
+</footer>
+</body>
+</html>

@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Review{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1 class="page-title">Review</h1>
+  <p class="muted" data-review-summary>
+    {% if total %}{{ total }} Clip{{ "s" if total != 1 }} {{ "warten" if total != 1 else "wartet" }} auf deine Freigabe{% else %}Keine Clips in der Warteschlange{% endif %}
+  </p>
+</div>
+
+{% if not pipeline_ok %}
+<div class="flash flash-error"><span class="flash-icon">!</span><span>Das Dashboard läuft ohne Pipeline – Freigeben und Ablehnen sind gerade nicht möglich.</span></div>
+{% endif %}
+
+{% if not items %}
+<section class="empty card">
+  <div class="empty-emoji" aria-hidden="true">🎬</div>
+  <h2>Alles erledigt!</h2>
+  <p class="muted">Gerade wartet kein Clip auf Review. Neue Clips erscheinen hier automatisch, sobald Claude sie geschnitten hat.</p>
+  <div class="row-actions center">
+    <a class="btn ghost" href="/scheduled">Geplante Posts</a>
+    <a class="btn ghost" href="/candidates">Kandidaten ansehen</a>
+  </div>
+</section>
+{% endif %}
+
+<div class="clips">
+{% for it in items %}
+{% set c = it.cand %}
+<article class="card clip" id="clip-{{ it.id }}" data-clip>
+  <div class="clip-media">
+    {% if it.video_url %}
+    <video controls playsinline preload="metadata"{% if it.thumb_url %} poster="{{ it.thumb_url }}"{% endif %} src="{{ it.video_url }}"></video>
+    {% else %}
+    <div class="no-video">
+      <span aria-hidden="true">⚠️</span>
+      <p>Video nicht gefunden{% if it.video_name %} ({{ it.video_name }}){% endif %}.<br><span class="muted small">Die Datei liegt nicht (mehr) im Clip-Ordner.</span></p>
+    </div>
+    {% endif %}
+    <span class="score score-{{ it.score|score_class }}" title="Viralitäts-Score von Claude (0–100)">
+      <span aria-hidden="true">🔥</span> {{ it.score }}
+    </span>
+    {% if it.duration %}<span class="duration">{{ it.duration|dur }}</span>{% endif %}
+  </div>
+
+  <div class="clip-body">
+    {% if it.hook %}<h2 class="hook">{{ it.hook }}</h2>{% endif %}
+    <p class="src-title">{{ c.title }}</p>
+
+    <div class="meta">
+      <span class="chip chip-src">{{ c.platform_label }}</span>
+      {% if c.creator_url|safe_url %}
+      <a class="chip" href="{{ c.creator_url|safe_url }}" target="_blank" rel="noopener noreferrer">👤 {{ c.creator_name }}</a>
+      {% else %}
+      <span class="chip">👤 {{ c.creator_name }}</span>
+      {% endif %}
+      {% if c.view_count is not none %}<span class="chip">👁 {{ c.view_count|num }}</span>{% endif %}
+      {% if c.created_at %}<span class="chip">🕒 {{ c.created_at|ago }}</span>{% endif %}
+      {% if it.language %}<span class="chip">{{ it.language|upper }}</span>{% endif %}
+    </div>
+
+    {% if it.is_leak or it.is_unsafe or it.note %}
+    <div class="warn">
+      {% if it.is_leak %}<p>⚠️ Claude hält das für <strong>geleaktes/unveröffentlichtes Material</strong>.</p>{% endif %}
+      {% if it.is_unsafe %}<p>⚠️ Claude hat <strong>problematische Inhalte</strong> markiert.</p>{% endif %}
+      {% if it.note %}<p>⚠️ {{ it.note }}</p>{% endif %}
+    </div>
+    {% endif %}
+
+    {% if it.reasoning %}
+    <blockquote class="reason"><span class="reason-label">Claude</span>{{ it.reasoning }}</blockquote>
+    {% endif %}
+
+    <p class="credit small muted">
+      Credit: {{ c.creator_name }}{% if c.creator_handle %} (@{{ c.creator_handle }}){% endif %} · {{ c.platform_label }}
+      {% if c.url|safe_url %} · <a href="{{ c.url|safe_url }}" target="_blank" rel="noopener noreferrer">Original ansehen ↗</a>{% endif %}
+    </p>
+
+    <form class="approve-form" method="post" action="/clips/{{ it.id }}/approve" data-ajax data-kind="approve">
+      {# Enter in einem Textfeld darf NICHT versehentlich freigeben #}
+      <button type="submit" disabled hidden aria-hidden="true" tabindex="-1"></button>
+      <input type="hidden" name="next" value="{{ '/?page=%d'|format(page) if page > 1 else '/' }}">
+
+      <fieldset class="platforms">
+        <legend>Posten auf</legend>
+        <div class="chip-checks">
+        {% for t in it.texts %}
+          <label class="check-chip">
+            <input type="checkbox" name="platforms" value="{{ t.platform }}"{% if t.checked %} checked{% endif %}>
+            <span>{{ t.name }}{% if t.platform in connected and not connected[t.platform] %} <em class="not-connected" title="Nicht verbunden">!</em>{% endif %}</span>
+          </label>
+        {% endfor %}
+        </div>
+        {% set missing = [] %}
+        {% for t in it.texts if t.platform in connected and not connected[t.platform] %}{% set _ = missing.append(t.name) %}{% endfor %}
+        {% if missing %}
+        <p class="hint small">{{ missing|join(", ") }} {{ "ist" if missing|length == 1 else "sind" }} nicht verbunden – <a href="/connections">jetzt verbinden</a>, sonst schlägt der Upload fehl.</p>
+        {% endif %}
+      </fieldset>
+
+      <div class="texts">
+      {% for t in it.texts %}
+        <details class="text-block"{% if loop.first and not t.title %} open{% endif %}>
+          <summary>
+            <span class="tb-platform">{{ t.name }}</span>
+            <span class="tb-preview">{{ t.title or "– kein Titel –" }}</span>
+            <span class="tb-edit" aria-hidden="true">✎</span>
+          </summary>
+          {% set tmax = 100 if t.platform == "youtube" else 150 %}
+          <label class="field">
+            <span class="field-label">Titel <span class="counter" data-counter-for="title-{{ it.id }}-{{ t.platform }}"></span></span>
+            <input type="text" id="title-{{ it.id }}-{{ t.platform }}" name="title_{{ t.platform }}" value="{{ t.title }}" data-max="{{ tmax }}" autocomplete="off" enterkeyhint="done">
+          </label>
+          <label class="field">
+            <span class="field-label">Beschreibung <span class="counter" data-counter-for="desc-{{ it.id }}-{{ t.platform }}"></span></span>
+            <textarea id="desc-{{ it.id }}-{{ t.platform }}" name="desc_{{ t.platform }}" rows="4" data-max="{{ 5000 if t.platform == 'youtube' else 2200 }}" data-autogrow>{{ t.description }}</textarea>
+          </label>
+          <p class="hint small">Credit-Zeile und Fan-Hinweis am Ende setzt WastedDailyVI beim Speichern und Freigeben immer selbst neu – Änderungen daran werden überschrieben. Text und Hashtags kannst du frei ändern (#GTA6 bleibt immer dabei).</p>
+          {% if t.platform == "tiktok" and tiktok_inbox %}<p class="hint small">TikTok-Inbox-Modus: Das Video kommt als Entwurf <strong>ohne</strong> diesen Text in der TikTok-App an. Die fertige Caption steht danach unter „Gepostet“ zum Kopieren und Einfügen.</p>{% endif %}
+        </details>
+      {% endfor %}
+      </div>
+
+      <div class="reject-reason">
+        <label class="field">
+          <span class="field-label">Ablehnungsgrund <span class="muted">(optional)</span></span>
+          <input type="text" name="reason" form="reject-{{ it.id }}" maxlength="500" placeholder="z. B. langweilig, schon gepostet …" autocomplete="off" enterkeyhint="done" data-reason-input>
+        </label>
+        <div class="quick-reasons" aria-label="Schnellauswahl Grund">
+          {% for r in reject_reasons %}<button type="button" class="pill" data-reason="{{ r }}">{{ r }}</button>{% endfor %}
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn danger big" form="reject-{{ it.id }}">✕ Ablehnen</button>
+        <button type="submit" class="btn primary big">✓ Freigeben</button>
+      </div>
+      <div class="actions-secondary">
+        <button type="submit" class="btn ghost small" formaction="/clips/{{ it.id }}/texts" data-kind="texts">Nur Texte speichern</button>
+      </div>
+    </form>
+    <form id="reject-{{ it.id }}" method="post" action="/clips/{{ it.id }}/reject" data-ajax data-kind="reject">
+      <input type="hidden" name="next" value="{{ '/?page=%d'|format(page) if page > 1 else '/' }}">
+    </form>
+  </div>
+</article>
+{% endfor %}
+</div>
+
+{% if pages > 1 %}
+<nav class="pager" aria-label="Seiten">
+  {% if page > 1 %}<a class="btn ghost" href="/?page={{ page - 1 }}">← Neuere</a>{% endif %}
+  <span class="muted">Seite {{ page }} von {{ pages }}</span>
+  {% if page < pages %}<a class="btn ghost" href="/?page={{ page + 1 }}">Ältere →</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

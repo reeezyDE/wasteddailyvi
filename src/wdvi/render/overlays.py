@@ -2,27 +2,443 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import re
+import threading
+import time
 from pathlib import Path
 
+import httpx
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+
 from wdvi.config import Settings
+from wdvi.render import _fonts
+
+log = logging.getLogger(__name__)
+
+TWEMOJI_URL = "https://raw.githubusercontent.com/jdecked/twemoji/main/assets/svg/{name}.svg"
+EMOJI_RETRY_S = 900.0  # nach Fehlschlag (z. B. offline) so lange nicht erneut versuchen
+HOOK_MAX_W = 0.88  # Pillenbreite max. 88 % der Bildbreite
+HOOK_MAX_SIZE = 0.10  # max. Schriftgröße (Anteil der Bildbreite)
+HOOK_MAX_SIZE_COMPACT = 0.075
+
+# Emoji-Cluster (inkl. ZWJ-Sequenzen, Hautfarben, Flaggen, Keycaps)
+_EMOJI_CLUSTER = re.compile(
+    "(?:[\U0001f1e6-\U0001f1ff]{2})"
+    "|(?:[0-9#*]️?⃣)"
+    "|(?:[\U0001f000-\U0001faff☀-➿⬀-⯿←-⇿⌀-⏿〰〽㊗㊙]"
+    "[️\U0001f3fb-\U0001f3ff]*"
+    "(?:‍[\U0001f000-\U0001faff☀-➿⬀-⯿♀♂][️\U0001f3fb-\U0001f3ff]*)*)"
+)
+
+_failed: dict[str, float] = {}
+_failed_lock = threading.Lock()
 
 
-def render_hook_png(text: str, settings: Settings, out: Path) -> Path:
-    """Großer Hook-Text (font_hook, Großbuchstaben, max 2 Zeilen, auto-skaliert auf ~90 % Breite) auf
-    abgerundetem Verlaufsbalken (color_primary -> color_secondary), schwarze Kontur. RGBA, Breite = render.width."""
-    raise NotImplementedError
+# --------------------------------------------------------------------------- Grundlagen
 
 
-def render_credit_png(platform_label: str, creator_name: str, settings: Settings, out: Path) -> Path:
-    """Kleines halbtransparentes Pill-Label, z. B. "🎥 TWITCH · xQc" (Emoji als Bild, nicht als Font)."""
-    raise NotImplementedError
+def _rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except (ValueError, IndexError):
+        return 255, 255, 255
 
 
-def render_watermark_png(settings: Settings, out: Path) -> Path:
-    """Dezentes "WASTED DAILY VI" (WASTED in color_wasted)."""
-    raise NotImplementedError
+def _font(settings: Settings, filename: str, size: int):
+    return _fonts.load(str(_fonts.font_path(settings.config.paths.fonts_dir, filename)), int(size))
+
+
+def _save(img: Image.Image, out: Path) -> Path:
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp.png")
+    img.save(tmp, "PNG", optimize=False)
+    os.replace(tmp, out)
+    return out
+
+
+def _rounded_mask(w: int, h: int, radius: int, ss: int = 4) -> Image.Image:
+    """Kantengeglättete Rounded-Rect-Maske (Supersampling)."""
+    big = Image.new("L", (w * ss, h * ss), 0)
+    ImageDraw.Draw(big).rounded_rectangle((0, 0, w * ss - 1, h * ss - 1), radius=radius * ss, fill=255)
+    return big.resize((w, h), Image.LANCZOS)
+
+
+def _gradient(w: int, h: int, c1: tuple[int, int, int], c2: tuple[int, int, int]) -> Image.Image:
+    t = np.linspace(0.0, 1.0, max(1, w), dtype=np.float32)[None, :, None]
+    a = np.array(c1, np.float32)[None, None, :]
+    b = np.array(c2, np.float32)[None, None, :]
+    row = a + (b - a) * t
+    arr = np.repeat(row, max(1, h), axis=0)
+    # leichter vertikaler Glanz (oben heller) für Tiefe
+    shade = np.linspace(1.08, 0.92, max(1, h), dtype=np.float32)[:, None, None]
+    arr = np.clip(arr * shade, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, "RGB")
+
+
+def split_emojis(text: str) -> list[tuple[str, bool]]:
+    """Text in (Stück, ist_emoji)-Teile zerlegen."""
+    parts: list[tuple[str, bool]] = []
+    pos = 0
+    for m in _EMOJI_CLUSTER.finditer(text):
+        if m.start() > pos:
+            parts.append((text[pos:m.start()], False))
+        parts.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text):
+        parts.append((text[pos:], False))
+    return parts
+
+
+# --------------------------------------------------------------------------- Emoji
+
+
+def _twemoji_names(emoji: str) -> list[str]:
+    cps = [f"{ord(c):x}" for c in emoji]
+    full = "-".join(cps)
+    no_fe0f = "-".join(c for c in cps if c != "fe0f")
+    # Twemoji-Dateinamen: ohne fe0f, außer in ZWJ-Sequenzen
+    first = full if "200d" in cps else no_fe0f
+    names: list[str] = []
+    for n in (first, full, no_fe0f):
+        if n and n not in names:
+            names.append(n)
+    return names
 
 
 def emoji_png(emoji: str, size: int, cache_dir: Path) -> Path | None:
     """Twemoji-SVG (raw.githubusercontent.com/jdecked/twemoji) -> PNG in size px, gecacht. None bei Fehler."""
-    raise NotImplementedError
+    try:
+        emoji = (emoji or "").strip()
+        if not emoji or size <= 0:
+            return None
+        names = _twemoji_names(emoji)
+        edir = Path(cache_dir) / "emoji"
+        for name in names:
+            png = edir / f"{name}_{int(size)}.png"
+            if png.is_file() and png.stat().st_size > 0:
+                return png
+        key = names[0]
+        with _failed_lock:
+            failed_at = _failed.get(key)
+        if failed_at is not None and time.monotonic() - failed_at < EMOJI_RETRY_S:
+            return None
+        edir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            svg = _fetch_svg(name, edir)
+            if svg is None:
+                continue
+            png = edir / f"{name}_{int(size)}.png"
+            import cairosvg  # erst hier: braucht libcairo
+
+            data = cairosvg.svg2png(bytestring=svg, output_width=int(size), output_height=int(size))
+            tmp = png.with_name(png.name + ".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, png)
+            return png
+        with _failed_lock:
+            _failed[key] = time.monotonic()
+        log.info("Emoji %r not found on Twemoji (%s)", emoji, ", ".join(names))
+    except Exception as e:  # Netzwerk, cairo, Dateisystem – Emoji ist Deko, nie fatal
+        log.warning("Emoji %r could not be rendered: %s", emoji, e)
+        try:
+            with _failed_lock:
+                _failed[_twemoji_names(emoji)[0]] = time.monotonic()
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_svg(name: str, edir: Path) -> bytes | None:
+    cached = edir / f"{name}.svg"
+    if cached.is_file() and cached.stat().st_size > 0:
+        return cached.read_bytes()
+    url = TWEMOJI_URL.format(name=name)
+    with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=True) as client:
+        r = client.get(url)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    data = r.content
+    if b"<svg" not in data[:2000]:
+        return None
+    tmp = cached.with_name(cached.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, cached)
+    return data
+
+
+def _emoji_image(emoji: str, size: int, settings: Settings) -> Image.Image | None:
+    p = emoji_png(emoji, size, settings.config.paths.cache_dir)
+    if p is None:
+        return None
+    try:
+        return Image.open(p).convert("RGBA")
+    except OSError:
+        return None
+
+
+# --------------------------------------------------------------------------- Hook
+
+
+def _paste_with_outline(img: Image.Image, em: Image.Image, x: int, y: int, width: int) -> None:
+    """Emoji mit dunkler Kontur + Schatten einsetzen (hebt sich vom Verlauf ab)."""
+    a = em.getchannel("A")
+    ring = a.filter(ImageFilter.MaxFilter(2 * width + 1)) if width > 0 else a
+    shadow = Image.new("RGBA", em.size, (0, 0, 0, 0))
+    shadow.putalpha(ring.point(lambda v: v * 200 // 255))
+    pad = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    pad.alpha_composite(shadow, (x, y + width))
+    pad.alpha_composite(shadow, (x, y))
+    pad.alpha_composite(em, (x, y))
+    img.alpha_composite(pad)
+
+
+def _hook_tokens(text: str) -> list[tuple[str, bool]]:
+    """Wörter + Emojis als Tokens (Emoji-Tokens separat, auch wenn am Wort klebend)."""
+    tokens: list[tuple[str, bool]] = []
+    for word in text.split():
+        for piece, is_emoji in split_emojis(word):
+            piece = piece if is_emoji else piece.strip()
+            if piece:
+                tokens.append((piece, is_emoji))
+    return tokens
+
+
+def _line_width(tokens: list[tuple[str, bool]], font, emoji_px: int, stroke: int) -> float:
+    if not tokens:
+        return 0.0
+    space = font.getlength(" ") + stroke  # Kontur frisst Wortabstand -> ausgleichen
+    w = 0.0
+    for i, (tok, is_emoji) in enumerate(tokens):
+        if i:
+            w += space
+        w += emoji_px if is_emoji else font.getlength(tok)
+    return w + 2 * stroke
+
+
+def _hook_layouts(tokens: list[tuple[str, bool]]) -> list[list[list[tuple[str, bool]]]]:
+    """Kandidaten: eine Zeile oder zwei Zeilen (jede Trennstelle)."""
+    out = [[tokens]]
+    for i in range(1, len(tokens)):
+        if tokens[i][1] and i == len(tokens) - 1:
+            continue  # Emoji nicht allein in Zeile 2
+        out.append([tokens[:i], tokens[i:]])
+    return out
+
+
+def render_hook_png(text: str, settings: Settings, out: Path, *, compact: bool = False) -> Path:
+    """Großer Hook-Text (font_hook, Großbuchstaben, max 2 Zeilen, auto-skaliert auf ~90 % Breite) auf
+    abgerundetem Verlaufsbalken (color_primary -> color_secondary), schwarze Kontur. RGBA, Breite = render.width.
+    compact=True: kleinere Schrift, bevorzugt einzeilig (Split-Layout: Facecam-Gesicht nicht verdecken)."""
+    cfg = settings.config
+    brand = cfg.brand
+    W = int(cfg.render.width)
+    fpath = str(_fonts.font_path(cfg.paths.fonts_dir, brand.font_hook))
+    checker = _fonts.GlyphChecker(_fonts.load(fpath, 64))
+
+    raw = " ".join((text or "").split()).upper()
+    tokens = [(tok if is_e else checker.filter(tok), is_e) for tok, is_e in _hook_tokens(raw)]
+    # Emojis, die nicht geladen werden können (offline/unbekannt), gar nicht erst einplanen
+    tokens = [t for t in tokens if t[0] and (not t[1] or emoji_png(t[0], 72, cfg.paths.cache_dir) is not None)]
+    if not tokens:
+        tokens = [(checker.filter(brand.name.upper()) or "WASTED", False)]
+
+    pill_max_w = round(W * HOOK_MAX_W)
+    pad_x = round(W * 0.042)
+    max_size, min_size = round(W * (HOOK_MAX_SIZE_COMPACT if compact else HOOK_MAX_SIZE)), max(12, round(W * 0.02))
+    two_line_factor = 0.75 if compact else 0.9
+
+    def fits(layout, size: int) -> bool:
+        font = _fonts.load(fpath, size)
+        stroke = max(2, round(size * 0.075))
+        return all(_line_width(ln, font, round(size * 0.92), stroke) <= pill_max_w - 2 * pad_x for ln in layout)
+
+    # Kandidaten (1 Zeile / 2 Zeilen) mit jeweils größter passender Schrift bewerten
+    best: tuple[float, list, int] | None = None
+    for layout in _hook_layouts(tokens):
+        lo, hi = min_size, max_size
+        if not fits(layout, lo):
+            continue
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(layout, mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        balance = 0.0
+        if len(layout) == 2:  # ausgewogene Zeilen bevorzugen
+            f = _fonts.load(fpath, lo)
+            w1, w2 = (_line_width(ln, f, round(lo * 0.92), 0) for ln in layout)
+            balance = abs(w1 - w2) / max(w1, w2, 1.0)
+        score = lo * (1.0 if len(layout) == 1 else two_line_factor) - balance * 12
+        if best is None or score > best[0]:
+            best = (score, layout, lo)
+    best_layout, size = (best[1], best[2]) if best else ([tokens], min_size)
+
+    font = _fonts.load(fpath, size)
+    stroke = max(2, round(size * 0.075))
+    emoji_px = round(size * 0.92)
+    cap_top = font.getbbox("H")[1]  # Abstand Oberkante -> Großbuchstaben
+    cap_h = font.getbbox("H")[3] - cap_top
+    line_gap = round(size * 0.12)
+    line_h = cap_h + 2 * stroke
+    text_h = len(best_layout) * line_h + (len(best_layout) - 1) * line_gap
+    pad_y = round(size * 0.30)
+    widths = [_line_width(ln, font, emoji_px, stroke) for ln in best_layout]
+    pill_w = min(pill_max_w, round(max(widths) + 2 * pad_x))
+    pill_h = round(text_h + 2 * pad_y)
+    radius = min(pill_h // 2, round(size * 0.42))
+
+    margin = round(size * 0.35)  # Platz für Schatten
+    img_h = pill_h + 2 * margin
+    img = Image.new("RGBA", (W, img_h), (0, 0, 0, 0))
+    px0 = (W - pill_w) // 2
+    py0 = margin
+
+    # Schatten unter der Pille
+    mask = _rounded_mask(pill_w, pill_h, radius)
+    shadow = Image.new("L", (W, img_h), 0)
+    shadow.paste(mask.point(lambda v: v * 120 // 255), (px0, py0 + round(size * 0.09)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(round(size * 0.14)))
+    img.paste(Image.new("RGBA", (W, img_h), (0, 0, 0, 255)), (0, 0), shadow)
+
+    # Pille: dunkler Rand + Verlauf
+    border = max(3, round(size * 0.05))
+    outer = _rounded_mask(pill_w + 2 * border, pill_h + 2 * border, radius + border)
+    img.paste(Image.new("RGBA", outer.size, (*_rgb(brand.color_outline), 255)), (px0 - border, py0 - border), outer)
+    grad = _gradient(pill_w, pill_h, _rgb(brand.color_primary), _rgb(brand.color_secondary)).convert("RGBA")
+    img.paste(grad, (px0, py0), mask)
+
+    # Text: weiß, dicke schwarze Kontur, harter Versatzschatten
+    draw = ImageDraw.Draw(img)
+    y = py0 + pad_y + stroke
+    for ln, lw in zip(best_layout, widths, strict=True):
+        x = (W - lw) / 2 + stroke
+        space = font.getlength(" ") + stroke
+        for i, (tok, is_emoji) in enumerate(ln):
+            if i:
+                x += space
+            if is_emoji:
+                em = _emoji_image(tok, emoji_px, settings)
+                if em is not None:
+                    ey = round(y + cap_h / 2 - emoji_px / 2)
+                    _paste_with_outline(img, em, round(x), ey, max(2, stroke // 2))
+                x += emoji_px
+                continue
+            ty = y - cap_top
+            draw.text((x, ty + round(size * 0.06)), tok, font=font, fill=(0, 0, 0, 150),
+                      stroke_width=stroke, stroke_fill=(0, 0, 0, 150))
+            draw.text((x, ty), tok, font=font, fill=(*_rgb(brand.color_text), 255),
+                      stroke_width=stroke, stroke_fill=(*_rgb(brand.color_outline), 255))
+            x += font.getlength(tok)
+        y += line_h + line_gap
+    return _save(img, out)
+
+
+# --------------------------------------------------------------------------- Credit / Wasserzeichen
+
+_PLATFORM_COLORS = {"twitch": "#B38CFF", "kick": "#53FC18", "youtube": "#FF4D4D", "reddit": "#FF7A45"}
+
+
+def _draw_camera_icon(size: int, color: tuple[int, int, int]) -> Image.Image:
+    """Ersatz-Icon (Videokamera), falls Twemoji nicht erreichbar ist."""
+    ss = 4
+    s = size * ss
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    body = (0, round(s * 0.25), round(s * 0.68), round(s * 0.75))
+    d.rounded_rectangle(body, radius=round(s * 0.1), fill=(*color, 255))
+    d.polygon([(round(s * 0.72), round(s * 0.5)), (s - 1, round(s * 0.28)), (s - 1, round(s * 0.72))],
+              fill=(*color, 255))
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def render_credit_png(platform_label: str, creator_name: str, settings: Settings, out: Path) -> Path:
+    """Kleines halbtransparentes Pill-Label, z. B. "🎥 TWITCH · xQc" (Emoji als Bild, nicht als Font)."""
+    cfg = settings.config
+    H, W = int(cfg.render.height), int(cfg.render.width)
+    size = max(14, round(H * 0.0158))  # 30 px bei 1920
+    fpath = str(_fonts.font_path(cfg.paths.fonts_dir, cfg.brand.font_captions))
+    font = _fonts.load(fpath, size)
+    checker = _fonts.GlyphChecker(font)
+
+    platform = checker.filter((platform_label or "").strip().upper())
+    name = " ".join(checker.filter(creator_name or "").split())
+    max_name_w = W * 0.42
+    if name and font.getlength(name) > max_name_w:
+        ell = "…" if checker.has("…") else "..."
+        while name and font.getlength(name + ell) > max_name_w:
+            name = name[:-1]
+        name = name.rstrip() + ell
+    sep = " · " if checker.has("·") else " | "
+    pieces: list[tuple[str, tuple[int, int, int]]] = []
+    if platform:
+        pieces.append((platform, _rgb(_PLATFORM_COLORS.get(platform.lower(), cfg.brand.color_secondary))))
+    if platform and name:
+        pieces.append((sep, (200, 200, 200)))
+    if name:
+        pieces.append((name, _rgb(cfg.brand.color_text)))
+    if not pieces:
+        pieces.append(("CLIP", _rgb(cfg.brand.color_text)))
+
+    # Icon: Emoji auf hellem Kreis (🎥 ist dunkel und ginge auf der dunklen Pille unter)
+    pill_h = round(size * 1.85)
+    icon_px = pill_h - 2 * max(3, round(size * 0.14))
+    emo_px = round(icon_px * 0.74)
+    icon = Image.new("RGBA", (icon_px, icon_px), (0, 0, 0, 0))
+    icon.paste(Image.new("RGBA", (icon_px, icon_px), (245, 245, 250, 255)), (0, 0),
+               _rounded_mask(icon_px, icon_px, icon_px // 2))
+    emo = _emoji_image("🎥", emo_px, settings) or _draw_camera_icon(emo_px, (30, 30, 36))
+    icon.alpha_composite(emo, ((icon_px - emo_px) // 2, (icon_px - emo_px) // 2))
+    gap = round(size * 0.4)
+    pad_x = round(size * 0.6)
+    pad_l = (pill_h - icon_px) // 2
+    text_w = sum(font.getlength(t) for t, _ in pieces)
+    pill_w = round(pad_l + icon_px + gap + text_w + pad_x)
+
+    img = Image.new("RGBA", (pill_w, pill_h), (0, 0, 0, 0))
+    mask = _rounded_mask(pill_w, pill_h, pill_h // 2)
+    img.paste(Image.new("RGBA", (pill_w, pill_h), (12, 12, 16, 165)), (0, 0), mask)
+    img.alpha_composite(icon, (pad_l, (pill_h - icon_px) // 2))
+    draw = ImageDraw.Draw(img)
+    bbox = font.getbbox("H")
+    ty = (pill_h - (bbox[3] - bbox[1])) / 2 - bbox[1]
+    x = float(pad_l + icon_px + gap)
+    for t, color in pieces:
+        draw.text((x, ty), t, font=font, fill=(*color, 255))
+        x += font.getlength(t)
+    return _save(img, out)
+
+
+def render_watermark_png(settings: Settings, out: Path) -> Path:
+    """Dezentes "WASTED DAILY VI" (WASTED in color_wasted)."""
+    cfg = settings.config
+    H = int(cfg.render.height)
+    size = max(12, round(H * 0.0185))  # ~36 px bei 1920
+    font = _fonts.load(str(_fonts.font_path(cfg.paths.fonts_dir, cfg.brand.font_hook)), size)
+    stroke = max(1, round(size * 0.08))
+    parts = [("WASTED", _rgb(cfg.brand.color_wasted)), (" DAILY VI", _rgb(cfg.brand.color_text))]
+    text_w = sum(font.getlength(t) for t, _ in parts)
+    bbox = font.getbbox("WASTED DAILY VI")
+    pad = stroke + 4
+    w = round(text_w + 2 * pad)
+    h = round(bbox[3] - bbox[1] + 2 * pad + 3)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    x = float(pad)
+    y = pad - bbox[1]
+    for t, color in parts:
+        draw.text((x + 2, y + 2), t, font=font, fill=(0, 0, 0, 120), stroke_width=stroke, stroke_fill=(0, 0, 0, 120))
+        draw.text((x, y), t, font=font, fill=(*color, 255), stroke_width=stroke, stroke_fill=(0, 0, 0, 220))
+        x += font.getlength(t)
+    # halbtransparent
+    alpha = img.getchannel("A").point(lambda v: v * 78 // 100)
+    img.putalpha(alpha)
+    return _save(img, out)

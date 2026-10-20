@@ -1,0 +1,60 @@
+# =============================================================================
+#  WastedDailyVI – Dauerbetrieb mit NVIDIA-GPU
+#
+#  Vorher einmal:   cp .env.example .env   und   cp config.example.yaml config.yaml   (ausfüllen!)
+#  Einrichten:      docker compose run --rm wdvi wdvi init
+#  Prüfen:          docker compose run --rm wdvi wdvi doctor
+#  Starten:         docker compose up -d          -> Dashboard: http://localhost:8420
+#  Logs ansehen:    docker compose logs -f
+#  Stoppen:         docker compose down
+#
+#  Diese Datei bitte NICHT bearbeiten (sonst klemmt 'sh scripts/update.sh' beim nächsten Update).
+#  Port, Heimnetz-Zugriff, Benutzer-ID, CPU-Build: Einträge in .env (siehe .env.example).
+#  Ohne NVIDIA-GPU: docker-compose.override.yml anlegen, siehe README ("Ohne GPU").
+# =============================================================================
+services:
+  wdvi:
+    build:
+      context: .
+      args:
+        # Werte kommen aus .env (Docker Compose liest sie dort automatisch)
+        WITH_CLAUDE_CLI: "${WITH_CLAUDE_CLI:-0}"        # 1 = Claude-Code-CLI ins Image (llm.backend: cli)
+        APP_UID: "${APP_UID:-1000}"                     # deine Benutzer-ID (Linux: id -u) -> data/ gehört dir
+        TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+        REFRESH: "${WDVI_REFRESH:-0}"                   # setzt scripts/update.sh: neueste yt-dlp/Claude-CLI
+    image: wasteddailyvi:latest
+    container_name: wasteddailyvi
+    env_file: .env
+    volumes:
+      - ./data:/app/data                        # Datenbank, Clips, Downloads, Tokens, Modell-Cache
+      - ./config.yaml:/app/config.yaml:ro       # deine Einstellungen (nur lesend)
+      - ./claude-home:/home/app/.claude         # Login der Claude-Code-CLI (nur für llm.backend: cli)
+    ports:
+      # Standard: nur auf diesem PC erreichbar (127.0.0.1). Heimnetz: WDVI_BIND_ADDR=0.0.0.0 in .env
+      # (dann unbedingt WDVI_DASHBOARD_PASSWORD setzen) – besser: Tailscale, siehe docs/BETRIEB.md.
+      # Port 8420 belegt: WDVI_HOST_PORT=8421 in .env (und dashboard.public_base_url anpassen).
+      - "${WDVI_BIND_ADDR:-127.0.0.1}:${WDVI_HOST_PORT:-8420}:8420"
+    restart: unless-stopped
+    # Beim Stoppen/Update laufende Uploads und den aktuellen Clip noch fertig machen lassen (TikTok prüft bis
+    # zu 5 min, ob ein Upload angekommen ist) – ein abgewürgter Upload wird sonst nicht automatisch wiederholt.
+    stop_grace_period: 10m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    healthcheck:
+      # gesund = Dashboard antwortet UND die Hintergrund-Jobs laufen (siehe scripts/healthcheck.py).
+      # Hinweis: Docker startet einen "unhealthy" Container NICHT von selbst neu – siehe docs/BETRIEB.md.
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

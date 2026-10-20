@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Gepostet{% endblock %}
+{% block content %}
+{% from "_macros.html" import caption_copy %}
+<div class="page-head">
+  <h1 class="page-title">Gepostet</h1>
+  <p class="muted">Die letzten {{ summary.count }} Posts mit den neuesten Zahlen</p>
+</div>
+
+<div class="tiles">
+  <div class="tile"><span class="tile-num">{{ summary.count }}</span><span class="tile-label">Posts</span></div>
+  <div class="tile"><span class="tile-num">{{ summary.views|num }}</span><span class="tile-label">Views gesamt</span></div>
+  <div class="tile"><span class="tile-num">{{ summary.avg|num if summary.avg is not none else "–" }}</span><span class="tile-label">Ø Views</span></div>
+  <div class="tile"><span class="tile-num">{{ summary.best|num if summary.best is not none else "–" }}</span><span class="tile-label">Bester Post</span></div>
+</div>
+
+{% if not posts %}
+<section class="empty card">
+  <div class="empty-emoji" aria-hidden="true">📈</div>
+  <h2>Noch nichts gepostet</h2>
+  <p class="muted">Sobald Clips online sind, siehst du sie hier mit Views, Likes und Kommentaren.</p>
+</section>
+{% endif %}
+
+<ul class="list">
+{% for p in posts %}
+  <li class="card row post">
+    {% if p.clip.thumb_url %}<img class="thumb" src="{{ p.clip.thumb_url }}" alt="" loading="lazy">{% else %}<div class="thumb thumb-empty" aria-hidden="true">🎬</div>{% endif %}
+    <div class="row-main">
+      <div class="row-top">
+        <span class="chip chip-{{ p.platform }}">{{ p.platform_name }}</span>
+        {% if p.status == "draft_sent" %}<span class="chip chip-warn" title="Liegt als Entwurf in der App – dort selbst veröffentlichen">Entwurf</span>{% endif %}
+        {% if p.note_kind == "private" %}<span class="chip chip-bad" title="Nur für dich sichtbar – siehe Hinweis">Privat</span>{% elif p.note_kind == "check" %}<span class="chip chip-warn" title="Siehe Hinweis">Prüfen</span>{% endif %}
+        <span class="small muted">{{ p.posted_at|local if p.posted_at else "–" }}</span>
+      </div>
+      <p class="row-title">{{ p.title }}</p>
+      {% if p.error %}<p class="small hint">{{ p.error }}</p>{% endif %}
+      {% if p.metrics %}
+      <div class="metrics">
+        <span title="Views">👁 {{ p.metrics.views|num }}</span>
+        <span title="Likes">❤️ {{ p.metrics.likes|num }}</span>
+        <span title="Kommentare">💬 {{ p.metrics.comments|num }}</span>
+        <span title="Shares">↗ {{ p.metrics.shares|num }}</span>
+      </div>
+      <p class="small muted">Stand: {{ p.metrics.fetched_at|ago }}{% if p.metrics.hours_after %} ({{ p.metrics.hours_after }} h nach Post){% endif %}</p>
+      {% else %}
+      <p class="small muted">Noch keine Zahlen (werden nach 24 h und 72 h geholt).</p>
+      {% endif %}
+      {% if p.status == "draft_sent" and p.caption %}
+      {{ caption_copy(p, "Der Entwurf kommt OHNE Text in der " ~ p.platform_name ~ "-App an: Caption kopieren, in der App beim Entwurf einfügen (enthält Credit, Fan-Hinweis und Hashtags) und dann posten.") }}
+      {% endif %}
+    </div>
+    {% if p.remote_url|safe_url %}
+    <a class="btn ghost small" href="{{ p.remote_url|safe_url }}" target="_blank" rel="noopener noreferrer">Ansehen ↗</a>
+    {% endif %}
+  </li>
+{% endfor %}
+</ul>
+
+{% if failed %}
+<section class="section">
+  <h2 class="section-title">Fehlgeschlagene Uploads</h2>
+  <ul class="list">
+  {% for g in failed %}
+    <li class="card row post failed" id="failed-clip-{{ g.clip_id }}">
+      {% if g.clip.thumb_url %}<img class="thumb" src="{{ g.clip.thumb_url }}" alt="" loading="lazy">{% else %}<div class="thumb thumb-empty" aria-hidden="true">🎬</div>{% endif %}
+      <div class="row-main">
+        {% for p in g.posts %}
+        <div class="row-top">
+          <span class="chip chip-{{ p.platform }}">{{ p.platform_name }}</span>
+          <span class="chip chip-bad">Fehler</span>
+          <span class="small muted">{{ p.scheduled_at|local }}</span>
+        </div>
+        {% if loop.first %}<p class="row-title">{{ p.title }}</p>{% endif %}
+        <p class="small error-text">{{ p.error or "Unbekannter Fehler" }}</p>
+        {% endfor %}
+        <form class="row-actions" method="post" action="/clips/{{ g.clip_id }}/requeue" data-confirm="Fehlgeschlagene Posts von Clip #{{ g.clip_id }} im nächsten freien Slot neu einplanen? Wurde ein Upload unterbrochen: vorher auf der Plattform prüfen, dass das Video nicht doch schon online ist (sonst Doppelpost).">
+          <button type="submit" class="btn ghost small">↻ Erneut einplanen</button>
+        </form>
+      </div>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}
