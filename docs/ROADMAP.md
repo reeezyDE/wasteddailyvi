@@ -86,6 +86,17 @@ Vergleich): ~0,10–0,15 $ pro Bewertung. Mit Abo zählen stattdessen die Nutzun
   kräftiger Text (2–4 Wörter, Markenfarben), Pfeil/Kreis, hoher Kontrast; 1280×720 JPG. YouTube `thumbnails.set`
   (braucht verifizierten Kanal).
 
+### [ ] 8. Dashboard als Kommandozentrale
+Der Nutzer will alles im eigenen Dashboard sehen (nicht im Terminal). Ausbau von `src/wdvi/dashboard/`:
+- **Übersicht/Startseite**: je Kanal (EN/DE) und Plattform: Posts heute/Woche, Views/Likes-Verlauf (Diagramme),
+  beste Clips, Warm-up-Stufe, nächste geplante Posts, Claude-Verbrauch (Aufrufe heute/Woche vs. Limit),
+  Warnungen (Strikes, Fehler, fehlende Zugangsdaten) – alles auf einen Blick, handytauglich.
+- **Steuerung**: Pipeline pausieren/fortsetzen, Kanal an/aus, Posts/Tag-Stufe manuell setzen, Link einfügen →
+  Clip erzeugen (statt `process-url` im Terminal), Best-of manuell anstoßen.
+- **Einrichtung im Browser**: Zugangsdaten/Quellen (Twitch-Keys, YouTube-Kanal-IDs, Subreddits) über Formulare statt
+  `.env`/`config.yaml` von Hand (Secrets nur verdeckt anzeigen, sicher speichern).
+- Läuft weiter lokal (`wdvi run`, Start per Desktop-Verknüpfung); später optional von unterwegs über Tailscale.
+
 ## Später (nicht jetzt bauen)
 
 - Phase 2: Kampagnen-Finder (z. B. Whop Content Rewards) für GTA-6-Kampagnen, Kampagnen-Regeln (Länge, Pflicht-Hashtags,
@@ -105,7 +116,8 @@ Vergleich): ~0,10–0,15 $ pro Bewertung. Mit Abo zählen stattdessen die Nutzun
 
 - [ ] PR #2 auf GitHub mergen (enthält #1) – sonst fehlt der aktuelle Stand auf `main`.
 - [ ] Handles reservieren: YouTube/TikTok/Instagram @WastedDailyVI und @WastedDailyDE.
-- [ ] Lokal einrichten: Claude Code installieren, Repo klonen, `scripts\dev-setup.ps1`, `claude` im Ordner starten.
+- [x] Lokal eingerichtet (Claude Desktop App, Projektordner `C:\Users\eljay\Videos\clipping\wasteddailyvi`).
+- [ ] Desktop-Verknüpfung anlegen: Claude bitten, `scripts\install-shortcut.ps1` auszuführen (optional `-Autostart`).
 - [ ] Zugangsdaten nach `docs/SETUP.md` (zuerst Twitch), Claude-CLI ist über das Abo angemeldet.
 - [ ] YouTube-API-Audit und TikTok-App-Audit beantragen.
 
