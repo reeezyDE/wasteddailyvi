@@ -5,10 +5,13 @@ virale Clips finden → Claude plant den Schnitt → Renderer macht 9:16-Shorts 
 Review-Dashboard → Posten auf YouTube Shorts / TikTok / Instagram. Läuft 24/7 lokal oder auf einem VPS.
 Der Nutzer ist kein Entwickler: antworte auf **Deutsch**, kurz, mit konkreten Befehlen für Windows-PowerShell.
 Claude läuft beim Nutzer über das **Abo** (nicht API): `llm.backend: cli`, Nutzungslimits schonen.
+Der Nutzer arbeitet in der **Claude Desktop App** (Code-Tab, Projektordner geöffnet) – **nicht im Terminal**:
+Befehle führst du selbst aus; schick ihn nie los, `claude` o. ä. in einem Terminal zu starten. Pipeline + Dashboard
+startet er per Doppelklick auf die Desktop-Verknüpfung „WastedDaily“ (`scripts/start-windows.bat`).
 
 ## ➡️ Nächste Aufgaben: `docs/ROADMAP.md`
 
-Dort stehen Strategie (EN- + DE-Kanal, Warm-up, später Kampagnen) und die **Bauschritte 1–7** mit Abnahmekriterien.
+Dort stehen Strategie (EN- + DE-Kanal, Warm-up, später Kampagnen) und die **Bauschritte 1–8** mit Abnahmekriterien (8 = Dashboard als Kommandozentrale).
 Wenn der Nutzer „weiter“, „mach weiter“ o. ä. sagt: nächsten offenen Bauschritt aus der Roadmap umsetzen.
 
 ## Schnell orientieren (statt den Code zu durchsuchen)

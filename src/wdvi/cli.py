@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -129,7 +130,19 @@ def main(
     ] = "INFO",
 ) -> None:
     """WastedDailyVI – virale GTA-6-Clips finden, schneiden, prüfen lassen und posten."""
+    _utf8_console()
     ctx.obj = {"config": config, "log_level": log_level}
+
+
+def _utf8_console() -> None:
+    """Windows-Konsolen (cp1252) stürzen sonst bei Emojis wie ✅ mit UnicodeEncodeError ab."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 # --------------------------------------------------------------------------- run

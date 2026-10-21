@@ -365,16 +365,13 @@ Erster Schritt immer: `docker compose run --rm wdvi wdvi doctor` – das zeigt f
 Das Projekt ist so aufgebaut, dass Claude Code (lokal auf deinem PC oder in der Cloud) direkt weitermachen kann –
 du schickst Claude einfach den Repo-Link.
 
-**Einmalig auf dem PC (PowerShell):**
-```powershell
-irm https://claude.ai/install.ps1 | iex        # Claude Code (alternativ: winget install Anthropic.ClaudeCode)
-git clone https://github.com/reeezyDE/wasteddailyvi
-cd wasteddailyvi
-powershell -ExecutionPolicy Bypass -File scripts\dev-setup.ps1   # Python-Umgebung, ffmpeg, Deno, Tests-Check
-claude                                         # Claude Code im Projektordner starten
-```
-Claude liest automatisch `CLAUDE.md` (Projektkarte, Regeln, Befehle) – das spart Tokens, weil Claude nicht erst
-den ganzen Code durchsuchen muss.
+**Einmalig:** Claude Desktop App öffnen → Tab **Code** → Projektordner `wasteddailyvi` öffnen (vorher einmal
+`git clone https://github.com/reeezyDE/wasteddailyvi`) → Claude schreiben: *„Richte das Projekt ein
+(scripts/dev-setup.ps1) und leg die Desktop-Verknüpfung an.“* Claude liest automatisch `CLAUDE.md` (Projektkarte,
+Regeln, Befehle) und `docs/ROADMAP.md` (nächste Aufgaben) – kein Terminal nötig.
+
+**Starten:** Doppelklick auf **WastedDaily** auf dem Desktop → Pipeline läuft im Hintergrund, Dashboard öffnet sich
+unter http://127.0.0.1:8420. Weiterentwickeln: in der Desktop App einfach *„mach weiter“* schreiben.
 
 **Clip schneiden lassen:** in Claude Code einfach schreiben, z. B. *„/clip schneide aus quelle.mp4 den Moment bei
 40:30“* oder einen YouTube-Link schicken. Claude nutzt dann den **Studio-Modus** und ist selbst der Editor
